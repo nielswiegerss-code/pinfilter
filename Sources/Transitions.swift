@@ -46,7 +46,7 @@ final class PinTransitions {
         }
 
         Task {
-            let target = await waitForRect(Self.closeupImageJS, timeout: 1.6)
+            let target = await waitForRect(Self.closeupImageJS, timeout: 1.8, minWait: switchDelay)
             if let target, let path = webView.url?.path {
                 closeupImage = (path, target)
                 UIView.animate(withDuration: 0.38, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0) {
@@ -98,7 +98,8 @@ final class PinTransitions {
         UIView.animate(withDuration: 0.28, delay: 0.08, options: .curveEaseOut) { screen?.alpha = 0 }
 
         Task {
-            let target = pinId.isEmpty ? nil : await waitForRect(Self.gridImageJS(pinId: pinId), timeout: 1.2)
+            let target = pinId.isEmpty ? nil
+                : await waitForRect(Self.gridImageJS(pinId: pinId), timeout: 1.4, minWait: switchDelay * 0.7)
             if let image, let target {
                 UIView.animate(withDuration: 0.36, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0) {
                     Self.move(image, from: imageRect, to: target)
@@ -123,7 +124,8 @@ final class PinTransitions {
         guard let webView, let path = webView.url?.path, path.contains("/pin/") else { return }
         if closeupImage?.path == path { return }
         Task {
-            if let rect = await waitForRect(Self.closeupImageJS, timeout: 2.5), webView.url?.path == path {
+            if let rect = await waitForRect(Self.closeupImageJS, timeout: 2.5, minWait: switchDelay),
+               webView.url?.path == path {
                 closeupImage = (path, rect)
             }
         }
@@ -144,9 +146,18 @@ final class PinTransitions {
             .scaledBy(x: sx, y: sy)
     }
 
+    // In de 4-kolommenstand wisselt de pagina bij openen/sluiten van breedte. Pinterest toont dan
+    // eerst ~0,4 s de oude opmaak; zo lang wachten we minstens voordat we een plek vertrouwen.
+    private var switchDelay: TimeInterval {
+        guard let webView, webView.bounds.width > webView.bounds.height, ColumnSetting.shared.columns == 4 else { return 0 }
+        return 0.45
+    }
+
     // Vraag de pagina herhaaldelijk om een plek, tot die twee keer achter elkaar gelijk is
-    private func waitForRect(_ js: String, timeout: TimeInterval) async -> CGRect? {
-        let deadline = Date().addingTimeInterval(timeout)
+    // (en er minstens `minWait` seconden voorbij zijn)
+    private func waitForRect(_ js: String, timeout: TimeInterval, minWait: TimeInterval = 0) async -> CGRect? {
+        let start = Date()
+        let deadline = start.addingTimeInterval(timeout)
         var previous: CGRect?
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 60_000_000)
@@ -154,7 +165,8 @@ final class PinTransitions {
             guard let text = try? await webView.evaluateJavaScript(js) as? String,
                   let rect = Self.rect(from: text) else { continue }
             if let p = previous, abs(p.minX - rect.minX) < 2, abs(p.minY - rect.minY) < 2,
-               abs(p.width - rect.width) < 2, abs(p.height - rect.height) < 2 {
+               abs(p.width - rect.width) < 2, abs(p.height - rect.height) < 2,
+               Date().timeIntervalSince(start) >= minWait {
                 return rect
             }
             previous = rect

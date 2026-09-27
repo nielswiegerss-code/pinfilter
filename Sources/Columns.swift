@@ -170,7 +170,14 @@ private let columnsJS = #"""
       document.head.appendChild(m);
       metas = [m];
     }
-    for (const m of metas) if (m.content !== c) m.content = c;
+    let changed = false;
+    for (const m of metas) if (m.content !== c) { m.content = c; changed = true; }
+    // Pinterest kiest zijn opmaak (smal of breed) opnieuw bij een "resize"-signaal, maar een
+    // gewijzigde viewport geeft dat signaal niet vanzelf. Zonder dit bleef een geopende pin in de
+    // smalle opmaak staan en werd de afbeelding afgesneden. Twee keer, omdat Pinterest even wacht.
+    if (changed) {
+      for (const ms of [60, 320]) setTimeout(() => window.dispatchEvent(new Event('resize')), ms);
+    }
   };
 
   // Pinterest zet zijn eigen viewport-regel; die overschrijven we steeds opnieuw

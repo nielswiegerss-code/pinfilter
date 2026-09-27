@@ -150,29 +150,71 @@ let pinSaveJS = #"""
 
   // Opent het "…"-menu van de pin onzichtbaar en tikt op een optie daarin.
   // Geeft false terug als er geen "…"-knop is (dan kan de aanroeper iets anders proberen).
+  // Tijdens een actie elke nieuwe laag die Pinterest bovenop de pagina zet (zoals het "…"-menu)
+  // meteen onzichtbaar maken. Een MutationObserver reageert nog vóór de volgende schermverversing,
+  // dus de laag komt nooit in beeld. Geeft een functie terug die alles weer zichtbaar maakt.
+  const hideNewLayers = () => {
+    const hidden = [];
+    const isLayer = (n) => [n, ...n.querySelectorAll(':scope > *, :scope > * > *')].slice(0, 25)
+      .some((e) => getComputedStyle(e).position === 'fixed');
+    const observer = new MutationObserver((records) => {
+      for (const r of records) {
+        for (const n of r.addedNodes) {
+          if (n.nodeType !== 1 || n.id === 'pf-menu' || n.id === 'pf-toast' || n.closest('[data-grid-item]')) continue;
+          if (isLayer(n)) { hidden.push([n, n.style.opacity]); n.style.opacity = '0'; }
+        }
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      for (const [n, opacity] of hidden) n.style.opacity = opacity;
+    };
+  };
+
+  // Buitenste "fixed" laag rond een element (het menu zelf), maar nooit iets waar de pin in zit
+  const outerLayer = (el, item) => {
+    let found = null;
+    for (let e = el; e && e !== document.body; e = e.parentElement) {
+      if (getComputedStyle(e).position === 'fixed') found = e;
+    }
+    return found && !found.contains(item) ? found : null;
+  };
+
   const viaPinMenu = async (item, selectors, test, what) => {
     const menuBtn = pick(item, MENU_BUTTON_SELECTORS);
     if (!menuBtn) return false;
     const html = document.documentElement;
     html.classList.add('pf-quiet');
+    const showLayers = hideNewLayers();
+    let layer = null, layerOpacity = '';
     try {
       pressButton(menuBtn);
       const option = await waitFor(() => pick(document, selectors, visible) ||
                                          clickables(document).find((b) => outsideGrid(b) && test(b)), 2500);
       if (!option) {
+        showLayers();
         html.classList.remove('pf-quiet');
         diagnose(document, what);
         return true;
       }
+      // Zat het menu in een laag die er al was? Die dan ook onzichtbaar houden
+      layer = outerLayer(option, item);
+      if (layer) { layerOpacity = layer.style.opacity; layer.style.opacity = '0'; }
+
       pressButton(option);
-      await sleep(250);
+      // Pas weer zichtbaar maken als Pinterests menu echt weg is (daarna komt bijv. de bordkeuze)
+      await waitFor(() => !option.isConnected || !visible(option), 1500);
+      await sleep(60);
       // Staat het menu nog open (optie sloot het niet zelf)? Dan netjes sluiten
       if (pick(document, selectors, visible)) {
         const close = pick(document, CLOSE_MENU, visible);
-        if (close) pressButton(close);
+        if (close) { pressButton(close); await sleep(200); }
       }
       return true;
     } finally {
+      if (layer) layer.style.opacity = layerOpacity;
+      showLayers();
       html.classList.remove('pf-quiet');
     }
   };
