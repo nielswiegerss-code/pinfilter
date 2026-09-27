@@ -45,8 +45,15 @@ struct PinterestView: UIViewRepresentable {
                                   forMainFrameOnly: true)
         config.userContentController.addUserScript(script)
 
+        // Lang indrukken op een pin = rond menu om op te slaan (los van het advertentiefilter)
+        config.userContentController.addUserScript(WKUserScript(source: pinSaveJS,
+                                                                injectionTime: .atDocumentEnd,
+                                                                forMainFrameOnly: true))
+        config.userContentController.add(HapticHandler(), name: "pfHaptic")
+
         let webView = PinWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true   // veeg terug zoals in een app
+        webView.allowsLinkPreview = false   // lang indrukken is voor ons eigen menu, niet voor iOS-linkvoorbeeld
         webView.uiDelegate = context.coordinator
         webView.navigationDelegate = context.coordinator
 
