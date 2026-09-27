@@ -38,6 +38,10 @@ struct PinterestView: UIViewRepresentable {
                                   injectionTime: .atDocumentStart,
                                   forMainFrameOnly: true)
         config.userContentController.addUserScript(script)
+        // Voor de pagina-analyse: welke advertentievelden kwamen er door het filter heen (zie Columns.swift)
+        config.userContentController.addUserScript(WKUserScript(source: adProbeJS,
+                                                                injectionTime: .atDocumentStart,
+                                                                forMainFrameOnly: true))
 
         // Lang indrukken op een pin = rond menu om op te slaan (los van het advertentiefilter)
         config.userContentController.addUserScript(WKUserScript(source: pinSaveJS,
@@ -94,6 +98,7 @@ struct PinterestView: UIViewRepresentable {
     final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, UIGestureRecognizerDelegate {
         weak var webView: WKWebView?
         let transitions = PinTransitions()
+        let longPressMenu = LongPressMenu()
         private var refresh: UIRefreshControl?
         private var urlObservation: NSKeyValueObservation?
         private let dismissPan = UIPanGestureRecognizer()
@@ -102,6 +107,7 @@ struct PinterestView: UIViewRepresentable {
             self.webView = webView
             self.refresh = refresh
             transitions.webView = webView
+            longPressMenu.attach(to: webView)   // lang indrukken op een pin (zie LongPressMenu.swift)
             // Pinterest wisselt van pagina zonder te herladen; de URL volgen we daarom zo
             urlObservation = webView.observe(\.url) { [weak self] _, _ in
                 Task { @MainActor in self?.updateForPage() }
@@ -207,8 +213,12 @@ let adFilterJS = #"""
   // Pinterests oudere data gebruikt snake_case (pin_promotion_id, is_promoted); de nieuwere
   // GraphQL-data (o.a. "More to explore" onder een geopende pin) camelCase: pinPromotionId,
   // isPromoted, en "promoter" (de adverteerder; bij gewone pins null).
+  // Ook "doorgeplaatste" advertenties (een opgeslagen advertentie die als gewone pin verschijnt,
+  // maar geopend "Ad" toont): is_downstream_promotion, en adData (bij gewone pins null).
   const adFlags = (x) => !!(x.pin_promotion_id || x.is_promoted === true ||
-    x.pinPromotionId || x.isPromoted === true || (x.promoter && typeof x.promoter === 'object'));
+    x.pinPromotionId || x.isPromoted === true || (x.promoter && typeof x.promoter === 'object') ||
+    x.is_downstream_promotion === true || x.isDownstreamPromotion === true ||
+    (x.adData && typeof x.adData === 'object') || (x.ad_data && typeof x.ad_data === 'object'));
   const isPromoted = (o) => {
     if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
     if (adFlags(o)) return true;
@@ -249,7 +259,7 @@ let adFilterJS = #"""
   document.addEventListener('DOMContentLoaded', updateBadge);
 
   // 1. JSON.parse: hier komen de beginstatus van de pagina en de meeste API-data langs
-  const MARKERS = /pin_promotion_id|"is_promoted":\s*true|"isPromoted":\s*true|"pinPromotionId":\s*"?[1-9]|"promoter":\s*\{/;
+  const MARKERS = /pin_promotion_id|"is_promoted":\s*true|"isPromoted":\s*true|"pinPromotionId":\s*"?[1-9]|"promoter":\s*\{|"is_downstream_promotion":\s*true|"isDownstreamPromotion":\s*true|"ad_?[dD]ata":\s*\{/;
   const originalParse = JSON.parse;
   JSON.parse = function (text, reviver) {
     const result = originalParse.call(this, text, reviver);

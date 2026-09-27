@@ -114,6 +114,10 @@ enum PageReport {
         }
       }
       lines.push('te breed: ' + (wide.join(' · ') || 'niets'));
+      // Advertentievelden van deze pin (door het filter heen gekomen), zie adProbeJS
+      const pinId = (location.pathname.split('/pin/')[1] || '').split('/')[0];
+      const ad = pinId && window.__pfAdInfo && window.__pfAdInfo[pinId];
+      lines.push('advertentievelden: ' + (pinId ? (ad ? ad.join(' · ') : 'geen') : '-'));
       lines.push('');
 
       // Boom van blokken met een data-test-id, buiten het raster
@@ -231,6 +235,38 @@ private let columnsJS = #"""
     try { localStorage.setItem('pfZoom', String(f)); } catch (e) {}
     apply();
     return 'ok';
+  };
+})();
+"""#
+
+// Voor de pagina-analyse: onthoudt per pin welke advertentie-achtige velden (met een echte waarde)
+// er in de data zaten, NA het advertentiefilter. Zo is te zien waarom een "Ad" erdoor glipte.
+// Draait na het filter, dus ziet alleen wat het filter heeft laten staan.
+let adProbeJS = #"""
+(() => {
+  const info = window.__pfAdInfo = {};
+  let count = 0;
+  const AD_KEY = /promot|sponsor|advertis|campaign|^ad[A-Z_]|^ad$|_ad$|isAd|is_ad/i;
+  const HINT = /romot|dData|d_data|ponsor|dvertis/;
+  const scan = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 14 || count > 800) return;
+    if (Array.isArray(node)) { for (const x of node) scan(x, depth + 1); return; }
+    const id = node.id;
+    if (typeof id === 'string' && /^[0-9]{6,}$/.test(id)) {
+      const flags = [];
+      for (const k of Object.keys(node)) {
+        const v = node[k];
+        if (AD_KEY.test(k) && v && v !== '0') flags.push(k + '=' + (typeof v === 'object' ? '{…}' : String(v).slice(0, 20)));
+      }
+      if (flags.length) { info[id] = flags; count++; }
+    }
+    for (const k of Object.keys(node)) { const v = node[k]; if (v && typeof v === 'object') scan(v, depth + 1); }
+  };
+  const parse = JSON.parse;
+  JSON.parse = function (text, reviver) {
+    const result = parse.call(this, text, reviver);
+    try { if (typeof text === 'string' && HINT.test(text)) scan(result, 0); } catch (e) {}
+    return result;
   };
 })();
 """#

@@ -53,16 +53,29 @@ final class PinTransitions {
 
         go()   // nu mag Pinterest de pin openen, onder de momentopname
 
-        UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseOut) {
-            backdrop.alpha = 1
-            image.transform = CGAffineTransform(scaleX: 1.03, y: 1.03)
+        // Direct naar de plek vliegen waar de afbeelding op de pinpagina komt (die plek bepaalt onze
+        // eigen opmaak in PageTweaks.swift), in plaats van eerst te wachten tot Pinterest klaar is
+        let predicted = predictedCloseupRect(for: rect)
+        UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseOut) { backdrop.alpha = 1 }
+        if let predicted {
+            UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.84, initialSpringVelocity: 0) {
+                Self.move(image, from: rect, to: predicted)
+            }
+        } else {
+            UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseOut) {
+                image.transform = CGAffineTransform(scaleX: 1.03, y: 1.03)
+            }
         }
 
         Task {
-            let target = await waitForRect(Self.closeupImageJS, timeout: 1.8, minWait: switchDelay)
+            let target = await waitForRect(Self.closeupImageJS, timeout: 1.8, minWait: max(switchDelay, predicted == nil ? 0 : 0.42))
             if let target, let path = webView.url?.path {
                 closeupImage = (path, target)
-                UIView.animate(withDuration: 0.38, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0) {
+                // Klein stukje bijschuiven als de echte plek iets anders is dan voorspeld
+                let close = predicted.map { abs($0.minX - target.minX) < 3 && abs($0.minY - target.minY) < 3 &&
+                                            abs($0.width - target.width) < 3 } ?? false
+                UIView.animate(withDuration: close ? 0.01 : (predicted == nil ? 0.38 : 0.24), delay: 0,
+                               usingSpringWithDamping: 0.9, initialSpringVelocity: 0) {
                     Self.move(image, from: rect, to: target)
                 } completion: { _ in
                     self.fadeOut(container, duration: 0.14)
@@ -71,6 +84,19 @@ final class PinTransitions {
                 fadeOut(container, duration: 0.2)
             }
         }
+    }
+
+    // Waar de grote afbeelding ongeveer komt: links, 16 pt van de rand, bovenaan, zo hoog als onze
+    // pin-opmaak toelaat. Alleen liggend en breed genoeg (anders gebruikt Pinterest een andere opmaak).
+    private func predictedCloseupRect(for source: CGRect) -> CGRect? {
+        guard let webView, webView.bounds.width > webView.bounds.height, webView.bounds.width >= 1000 else { return nil }
+        let aspect = source.width / max(source.height, 1)
+        let top: CGFloat = 20
+        var height = min(webView.bounds.height - top - 150, 555 * 1.12)
+        var width = height * aspect
+        let maxWidth: CGFloat = 508 * 1.12
+        if width > maxWidth { width = maxWidth; height = width / aspect }
+        return CGRect(x: 16, y: top, width: width, height: height)
     }
 
     // Laat JavaScript de vastgehouden klik doorgeven aan Pinterest
