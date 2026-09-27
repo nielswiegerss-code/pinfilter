@@ -49,7 +49,13 @@ struct PinterestView: UIViewRepresentable {
         config.userContentController.addUserScript(WKUserScript(source: pinSaveJS,
                                                                 injectionTime: .atDocumentEnd,
                                                                 forMainFrameOnly: true))
-        config.userContentController.add(HapticHandler(), name: "pfHaptic")
+        let bridge = NativeBridge()
+        config.userContentController.add(bridge, name: "pfNative")
+
+        // TIJDELIJK: meet welke breedte Pinterest uitleest, en laat outerWidth meezoomen
+        config.userContentController.addUserScript(WKUserScript(source: widthProbeJS,
+                                                                injectionTime: .atDocumentStart,
+                                                                forMainFrameOnly: true))
 
         let webView = PinWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true   // veeg terug zoals in een app
@@ -64,6 +70,7 @@ struct PinterestView: UIViewRepresentable {
                           for: .valueChanged)
         webView.scrollView.refreshControl = refresh
         context.coordinator.webView = webView
+        bridge.webView = webView
         ZoomLab.shared.webView = webView
 
         // Eerst de bewaarde login terugzetten, pas daarna de pagina laden

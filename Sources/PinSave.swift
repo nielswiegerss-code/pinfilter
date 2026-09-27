@@ -3,15 +3,25 @@ import WebKit
 
 // Lang indrukken op een pin opent een rond menu, zoals in de Pinterest-app.
 // Sleep naar een optie en laat los (of tik erop). Het opslaan gebruikt Pinterests eigen
-// "Opslaan"-knop: we laten de pin denken dat de muis erboven hangt en klikken dan op die knop.
+// "Opslaan"-knop: eerst in het raster (via een nagebootste muis-hover), en als die daar niet
+// bestaat (tablet-site) op de pinpagina zelf, waarna we automatisch teruggaan.
 
-// Trilt kort als het menu verschijnt (aangeroepen vanuit JavaScript)
-final class HapticHandler: NSObject, WKScriptMessageHandler {
+// Brug van JavaScript naar de app: trillen, en scrollen uit/aan zolang het menu open is
+final class NativeBridge: NSObject, WKScriptMessageHandler {
+    weak var webView: WKWebView?
     private let generator = UIImpactFeedbackGenerator(style: .medium)
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
-        generator.impactOccurred()
+        guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        switch type {
+        case "haptic":
+            generator.impactOccurred()
+        case "scroll":
+            webView?.scrollView.isScrollEnabled = (body["on"] as? Bool) ?? true
+        default:
+            break
+        }
     }
 }
 
@@ -21,10 +31,10 @@ let pinSaveJS = #"""
   const HOLD_MS = 450;      // hoe lang indrukken voordat het menu verschijnt
   const MOVE_CANCEL = 10;   // zoveel pixels bewegen = scrollen, geen lang indrukken
 
-  // iOS-linkvoorbeeld, "afbeelding bewaren" en tekstselectie uitzetten op pins
+  // iOS-"afbeelding bewaren" en tekstselectie uitzetten op pins (erft door naar alles erin)
   const style = document.createElement('style');
   style.textContent =
-    '[data-grid-item], [data-grid-item] * { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; }' +
+    '[data-grid-item] { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; }' +
     '#pf-menu { position: fixed; inset: 0; z-index: 2147483646; background: rgba(0,0,0,.25); }' +
     '#pf-menu .pf-opt { position: fixed; width: 64px; height: 64px; margin: -32px 0 0 -32px; border-radius: 50%;' +
     '  background: #fff; color: #111; display: flex; align-items: center; justify-content: center; font-size: 26px;' +
@@ -47,12 +57,13 @@ let pinSaveJS = #"""
     t._timer = setTimeout(() => t.remove(), ms);
   };
 
-  const haptic = () => { try { webkit.messageHandlers.pfHaptic.postMessage(1); } catch (e) {} };
+  const native = (msg) => { try { webkit.messageHandlers.pfNative.postMessage(msg); } catch (e) {} };
+  const haptic = () => native({ type: 'haptic' });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // --- Pinterests eigen knoppen tevoorschijn halen en vinden ---
+  // --- Pinterests eigen knoppen vinden ---
 
-  // Laat React denken dat de muis boven de pin hangt, zodat de hover-knoppen verschijnen
+  // Laat React denken dat de muis boven de pin hangt, zodat de hover-knoppen verschijnen (desktop-site)
   const hover = (item) => {
     const target = item.querySelector('a[href*="/pin/"]') || item;
     const r = target.getBoundingClientRect();
@@ -73,37 +84,42 @@ let pinSaveJS = #"""
   };
 
   const label = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).trim().toLowerCase();
+  const isSave = (el) => /^(opslaan|save|bewaren)$/.test(label(el));
+  const isBoard = (el) => /bord|board/.test(label(el) + ' ' + (el.getAttribute('data-test-id') || '').toLowerCase()) && !isSave(el);
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const buttonsIn = (root) => [...root.querySelectorAll('button, [role="button"]')];
 
-  const findSaveButton = (item) => {
-    const direct = item.querySelector(
-      '[data-test-id="PinBetterSaveButton"], [data-test-id="pin-save-button"], [data-test-id="save-button"],' +
-      '[aria-label="Opslaan"], [aria-label="Save"]');
-    if (direct) return direct;
-    return [...item.querySelectorAll('button, [role="button"]')]
-      .find((b) => /^(opslaan|save)$/.test(label(b)));
+  const SAVE_SELECTORS =
+    '[data-test-id="PinBetterSaveButton"], [data-test-id="pin-save-button"], [data-test-id="save-button"],' +
+    '[data-test-id="closeup-save-button"] button, [data-test-id="closeup-save-button"], [aria-label="Opslaan"], [aria-label="Save"]';
+  const BOARD_SELECTORS =
+    '[data-test-id="board-dropdown-select-button"], [data-test-id="boardSelectionDropdown"],' +
+    '[data-test-id="board-dropdown"], [data-test-id="PinBetterSaveDropdown"], [data-test-id="closeup-board-dropdown"]';
+
+  // Zoek binnen een pin in het raster
+  const findIn = (item, selectors, test) =>
+    item.querySelector(selectors) || buttonsIn(item).find(test);
+
+  // Zoek op de pinpagina, maar niet in het raster met gerelateerde pins eronder
+  const findOnCloseup = (selectors, test) => {
+    const outsideGrid = (el) => !el.closest('[data-grid-item]') && visible(el);
+    return [...document.querySelectorAll(selectors)].find(outsideGrid) ||
+      buttonsIn(document).find((b) => outsideGrid(b) && test(b));
   };
 
-  const findBoardDropdown = (item) => {
-    const direct = item.querySelector(
-      '[data-test-id="board-dropdown-select-button"], [data-test-id="boardSelectionDropdown"],' +
-      '[data-test-id="board-dropdown"], [data-test-id="PinBetterSaveDropdown"]');
-    if (direct) return direct;
-    return [...item.querySelectorAll('button, [role="button"]')]
-      .find((b) => /bord|board/.test(label(b)) && !/^(opslaan|save)$/.test(label(b)));
-  };
-
-  // Wacht tot een knop verschijnt (Pinterest tekent hover-knoppen pas na de hover)
-  const waitFor = async (fn, ms = 1200) => {
+  // Wacht tot een knop verschijnt (Pinterest tekent knoppen vaak pas even later)
+  const waitFor = async (fn, ms) => {
     for (let t = 0; t < ms; t += 100) { const el = fn(); if (el) return el; await sleep(100); }
     return null;
   };
 
   // Als iets niet lukt: laat zien welke knoppen er wél zijn, zodat het te repareren is
-  const diagnose = (item, what) => {
-    const found = [...item.querySelectorAll('button, [role="button"], [data-test-id]')]
+  const diagnose = (root, what) => {
+    const found = [...root.querySelectorAll('button, [role="button"], [data-test-id]')]
+      .filter((b) => !b.closest('[data-grid-item]') || root !== document)
       .map((b) => b.getAttribute('data-test-id') || b.getAttribute('aria-label') || (b.textContent || '').trim().slice(0, 20))
       .filter(Boolean);
-    toast(what + ' niet gevonden. Maak een screenshot voor Claude:\n' + [...new Set(found)].slice(0, 25).join(' · '), 12000);
+    toast(what + ' niet gevonden. Maak een screenshot voor Claude:\n' + [...new Set(found)].slice(0, 30).join(' · '), 15000);
   };
 
   const pressButton = (el) => {
@@ -115,21 +131,52 @@ let pinSaveJS = #"""
     el.click();
   };
 
+  // Open de pin binnen Pinterest zelf (geen volledige herlaad), zodat "terug" naar het raster werkt
+  const openPin = (item) => {
+    const a = item.querySelector('a[href*="/pin/"]');
+    if (!a) return false;
+    a.click();
+    return true;
+  };
+
   const actions = {
     async save(item) {
+      // 1. Desktop-site: Opslaan-knop in het raster
       hover(item);
-      const btn = await waitFor(() => findSaveButton(item));
-      if (!btn) { diagnose(item, 'Opslaan-knop'); return; }
-      pressButton(btn);
-      setTimeout(() => unhover(item), 1500);
+      const btn = await waitFor(() => findIn(item, SAVE_SELECTORS, isSave), 700);
+      if (btn) { pressButton(btn); setTimeout(() => unhover(item), 1500); return; }
+      unhover(item);
+
+      // 2. Tablet-site: pin openen, daar opslaan, en terug
+      const startURL = location.href;
+      if (!openPin(item)) { diagnose(item, 'Link naar pin'); return; }
+      toast('Opslaan…', 4000);
+      const closeupBtn = await waitFor(() => location.href !== startURL && findOnCloseup(SAVE_SELECTORS, isSave), 5000);
+      if (!closeupBtn) { diagnose(document, 'Opslaan-knop op de pinpagina'); return; }
+      pressButton(closeupBtn);
+      await sleep(1200);
+      // Opent Pinterest een bordkeuze (bijv. de eerste keer)? Dan blijven we hier staan.
+      if (document.querySelector('[role="dialog"]')) return;
+      toast('Opgeslagen', 1500);
+      history.back();
     },
+
     async board(item) {
+      // 1. Desktop-site: bordkeuze in het raster
       hover(item);
-      const dd = await waitFor(() => findBoardDropdown(item));
+      const dd = await waitFor(() => findIn(item, BOARD_SELECTORS, isBoard), 700);
       if (dd) { pressButton(dd); return; }
-      // Geen bordkeuze in het raster: open de pin, daar kun je een bord kiezen
-      const a = item.querySelector('a[href*="/pin/"]');
-      if (a) location.href = a.href; else diagnose(item, 'Bordkeuze');
+      unhover(item);
+
+      // 2. Tablet-site: pin openen en daar de bordkeuze openen
+      const startURL = location.href;
+      if (!openPin(item)) { diagnose(item, 'Link naar pin'); return; }
+      const closeupDD = await waitFor(() => location.href !== startURL && findOnCloseup(BOARD_SELECTORS, isBoard), 5000);
+      if (closeupDD) { pressButton(closeupDD); return; }
+      // Geen losse bordkeuze: dan maar de Opslaan-knop, die opent op de tablet-site vaak de bordkeuze
+      const closeupBtn = findOnCloseup(SAVE_SELECTORS, isSave);
+      if (closeupBtn) { pressButton(closeupBtn); return; }
+      diagnose(document, 'Bordkeuze op de pinpagina');
     }
   };
 
@@ -142,6 +189,7 @@ let pinSaveJS = #"""
   let menu = null;   // { el, item, opts: [{key, x, y, el, labelEl}], hot }
 
   const openMenu = (item, x, y) => {
+    native({ type: 'scroll', on: false });   // scrollen uit zolang het menu open is
     haptic();
     const el = document.createElement('div');
     el.id = 'pf-menu';
@@ -171,7 +219,10 @@ let pinSaveJS = #"""
     menu = { el, item, opts, hot: null };
   };
 
-  const closeMenu = () => { if (menu) { menu.el.remove(); menu = null; } };
+  const closeMenu = () => {
+    if (menu) { menu.el.remove(); menu = null; }
+    native({ type: 'scroll', on: true });
+  };
 
   const setHot = (x, y) => {
     let hot = null;
@@ -189,24 +240,26 @@ let pinSaveJS = #"""
   };
 
   // --- Aanraken ---
+  // touchstart/touchmove zijn "passive": ze houden het scrollen nooit op. Alleen touchend mag
+  // blokkeren, zodat loslaten op het menu niet ook nog de pin opent.
 
-  let pending = null;       // { timer, x, y, item }
+  let pending = null;       // { timer, x, y }
   let swallowClick = false; // voorkomt dat loslaten na het menu de pin opent
 
   document.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) { if (pending) clearTimeout(pending.timer); pending = null; return; }
+    if (pending) { clearTimeout(pending.timer); pending = null; }
+    if (e.touches.length !== 1) return;
     const t = e.touches[0];
-    if (menu && !menu.el.isConnected) menu = null;   // menu door de pagina weggehaald
+    if (menu && !menu.el.isConnected) closeMenu();   // menu door de pagina weggehaald
     if (menu) {   // menu staat open en je tikt: optie kiezen of sluiten
       setHot(t.clientX, t.clientY);
       return;
     }
-    if (pending) { clearTimeout(pending.timer); pending = null; }
     const item = e.target.closest && e.target.closest('[data-grid-item]');
     if (!item) return;
     const x = t.clientX, y = t.clientY;
     pending = {
-      x, y, item,
+      x, y,
       timer: setTimeout(() => { pending = null; swallowClick = true; openMenu(item, x, y); }, HOLD_MS)
     };
   }, { capture: true, passive: true });
@@ -216,8 +269,8 @@ let pinSaveJS = #"""
     if (pending && Math.hypot(t.clientX - pending.x, t.clientY - pending.y) > MOVE_CANCEL) {
       clearTimeout(pending.timer); pending = null;   // gewoon scrollen
     }
-    if (menu) { e.preventDefault(); setHot(t.clientX, t.clientY); }
-  }, { capture: true, passive: false });
+    if (menu) setHot(t.clientX, t.clientY);
+  }, { capture: true, passive: true });
 
   document.addEventListener('touchend', (e) => {
     if (pending) { clearTimeout(pending.timer); pending = null; }
