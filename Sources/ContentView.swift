@@ -50,6 +50,11 @@ struct PinterestView: UIViewRepresentable {
         config.userContentController.addUserScript(WKUserScript(source: pageTweaksJS,
                                                                 injectionTime: .atDocumentEnd,
                                                                 forMainFrameOnly: true))
+        // Open-animatie: tik op een pin even vasthouden en de app laten animeren (zie Transitions.swift).
+        // Na pinSaveJS, zodat het lang-indrukken-menu een klik eerst kan tegenhouden.
+        config.userContentController.addUserScript(WKUserScript(source: transitionsJS,
+                                                                injectionTime: .atDocumentEnd,
+                                                                forMainFrameOnly: true))
         // 4 of 5 kolommen in liggende stand (zie Columns.swift)
         config.userContentController.addUserScript(ColumnSetting.shared.script)
 
@@ -67,6 +72,7 @@ struct PinterestView: UIViewRepresentable {
         webView.scrollView.refreshControl = refresh
         context.coordinator.attach(webView, refresh: refresh)
         bridge.webView = webView
+        bridge.transitions = context.coordinator.transitions
         ColumnSetting.shared.webView = webView
 
         // Eerst de bewaarde login terugzetten, pas daarna de pagina laden
@@ -82,6 +88,7 @@ struct PinterestView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         weak var webView: WKWebView?
+        let transitions = PinTransitions()
         private var refresh: UIRefreshControl?
         private var urlObservation: NSKeyValueObservation?
         private var panStartedAtTop = false
@@ -89,6 +96,7 @@ struct PinterestView: UIViewRepresentable {
         func attach(_ webView: WKWebView, refresh: UIRefreshControl) {
             self.webView = webView
             self.refresh = refresh
+            transitions.webView = webView
             // Pinterest wisselt van pagina zonder te herladen; de URL volgen we daarom zo
             urlObservation = webView.observe(\.url) { [weak self] _, _ in
                 Task { @MainActor in self?.updateForPage() }
@@ -103,6 +111,18 @@ struct PinterestView: UIViewRepresentable {
             guard let webView else { return }
             let wanted = isPinPage ? nil : refresh
             if webView.scrollView.refreshControl !== wanted { webView.scrollView.refreshControl = wanted }
+            transitions.pageChanged()
+
+            // Na de kolommenwissel (andere viewport) kan de pagina zijwaarts verschoven blijven staan,
+            // waardoor een pin aan de zijkant afgesneden lijkt. Dan terugzetten naar de linkerrand.
+            Task {
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                let scrollView = webView.scrollView
+                let fits = scrollView.contentSize.width <= scrollView.bounds.width + 1
+                if fits && abs(scrollView.contentOffset.x) > 0.5 {
+                    scrollView.setContentOffset(CGPoint(x: 0, y: scrollView.contentOffset.y), animated: false)
+                }
+            }
         }
 
         // Geopende pin sluiten door bovenaan naar beneden te swipen
@@ -118,8 +138,7 @@ struct PinterestView: UIViewRepresentable {
                 let pulled = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
                 let downward = move.y > 100 && abs(move.x) < move.y * 0.6
                 if panStartedAtTop && downward && pulled > 60 && webView.canGoBack {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    webView.goBack()
+                    transitions.dismissPin(pulled: pulled)   // met terugvlieg-animatie
                 }
             default:
                 break

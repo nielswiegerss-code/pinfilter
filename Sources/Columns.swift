@@ -38,21 +38,106 @@ final class ColumnSetting: ObservableObject {
     }
 }
 
-// Knopje rechtsonder (alleen liggend) om te wisselen tussen 4 en 5 kolommen
+// Knopje rechtsonder (alleen liggend) om te wisselen tussen 4 en 5 kolommen.
+// Verborgen extra: lang indrukken toont een analyse van de pagina (voor Claude, om de layout aan te passen).
 struct ColumnButton: View {
     @ObservedObject var setting = ColumnSetting.shared
+    @State private var report: String?
 
     var body: some View {
-        Button { setting.toggle() } label: {
-            Label("\(setting.columns) kolommen", systemImage: "square.grid.3x3")
-                .font(.footnote.weight(.semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.regularMaterial, in: Capsule())
-        }
-        .foregroundStyle(.primary)
-        .padding(12)
+        Label("\(setting.columns) kolommen", systemImage: "square.grid.3x3")
+            .font(.footnote.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.regularMaterial, in: Capsule())
+            .contentShape(Capsule())
+            .onTapGesture { setting.toggle() }
+            .onLongPressGesture(minimumDuration: 0.8) {
+                Task { report = await PageReport.make(webView: setting.webView) }
+            }
+            .padding(12)
+            .sheet(isPresented: Binding(get: { report != nil }, set: { if !$0 { report = nil } })) {
+                NavigationStack {
+                    ScrollView {
+                        Text(report ?? "")
+                            .font(.system(size: 11, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                    .navigationTitle("Pagina-analyse")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("Sluit") { report = nil } }
+                    }
+                }
+            }
     }
+}
+
+// Overzicht van hoe de huidige pagina is opgebouwd: maten, viewport en de blokken met een
+// data-test-id (Pinterests eigen namen). Niels maakt er een screenshot van voor Claude.
+@MainActor
+enum PageReport {
+    static func make(webView: WKWebView?) async -> String {
+        guard let webView else { return "Geen webview" }
+        let sv = webView.scrollView
+        let native = String(format: "app: zoom %.2f  offset %.0f,%.0f  inhoud %.0fx%.0f  scherm %.0fx%.0f",
+                            sv.zoomScale, sv.contentOffset.x, sv.contentOffset.y,
+                            sv.contentSize.width, sv.contentSize.height, sv.bounds.width, sv.bounds.height)
+        let page = (try? await webView.evaluateJavaScript(reportJS) as? String) ?? "(pagina gaf geen antwoord)"
+        return native + "\n" + page
+    }
+
+    private static let reportJS = #"""
+    (() => {
+      const NL = String.fromCharCode(10);
+      const d = document.documentElement, vv = window.visualViewport;
+      const lines = [];
+      lines.push('pad ' + location.pathname);
+      lines.push('viewport ' + [...document.querySelectorAll('meta[name="viewport"]')].map((m) => m.content).join(' | '));
+      lines.push('breed ' + innerWidth + ' client ' + d.clientWidth + ' scroll ' + d.scrollWidth +
+                 ' vv ' + (vv ? Math.round(vv.width) + '@' + vv.scale.toFixed(2) + ' links ' + Math.round(vv.offsetLeft) : '-'));
+
+      // Elementen die breder zijn dan het scherm (oorzaak van afsnijden)
+      const wide = [];
+      for (const el of document.querySelectorAll('body *')) {
+        if (wide.length >= 6) break;
+        if (el.closest('[data-grid-item]')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width > innerWidth + 5 || r.left < -5) {
+          wide.push((el.getAttribute('data-test-id') || el.tagName.toLowerCase()) + ' ' + Math.round(r.left) + '+' + Math.round(r.width));
+        }
+      }
+      lines.push('te breed: ' + (wide.join(' · ') || 'niets'));
+      lines.push('');
+
+      // Boom van blokken met een data-test-id, buiten het raster
+      const walk = (el, depth) => {
+        if (lines.length > 110) return;
+        const id = el.getAttribute && el.getAttribute('data-test-id');
+        let next = depth;
+        if (id) {
+          const r = el.getBoundingClientRect();
+          const cs = getComputedStyle(el);
+          const extra = [];
+          if (cs.backgroundColor !== 'rgba(0, 0, 0, 0)') extra.push('bg ' + cs.backgroundColor);
+          if (cs.borderRadius !== '0px') extra.push('rond ' + cs.borderRadius);
+          if (cs.boxShadow !== 'none') extra.push('schaduw');
+          if (cs.position === 'fixed' || cs.position === 'sticky') extra.push(cs.position);
+          lines.push('  '.repeat(depth) + id + '  ' + Math.round(r.left) + ',' + Math.round(r.top) + ' ' +
+                     Math.round(r.width) + 'x' + Math.round(r.height) + (extra.length ? '  [' + extra.join(', ') + ']' : ''));
+          next = depth + 1;
+        }
+        for (const c of el.children) {
+          if (c.hasAttribute && c.hasAttribute('data-grid-item')) continue;
+          walk(c, next);
+        }
+      };
+      walk(document.body, 0);
+      return lines.join(NL);
+    })()
+    """#
 }
 
 private let columnsJS = #"""

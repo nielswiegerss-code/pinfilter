@@ -10,6 +10,7 @@ import WebKit
 // Brug van JavaScript naar de app: trillen, en scrollen uit/aan zolang het menu open is
 final class NativeBridge: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
+    weak var transitions: PinTransitions?
     private let generator = UIImpactFeedbackGenerator(style: .medium)
 
     func userContentController(_ userContentController: WKUserContentController,
@@ -20,6 +21,11 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             generator.impactOccurred()
         case "scroll":
             webView?.scrollView.isScrollEnabled = (body["on"] as? Bool) ?? true
+        case "pinTap":
+            // Tik op een pin in het raster: open-animatie starten (zie Transitions.swift)
+            let n = { (key: String) in CGFloat((body[key] as? NSNumber)?.doubleValue ?? 0) }
+            let rect = CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h"))
+            MainActor.assumeIsolated { transitions?.pinTapped(rect: rect) }
         default:
             break
         }
@@ -36,15 +42,24 @@ let pinSaveJS = #"""
   const style = document.createElement('style');
   style.textContent =
     '[data-grid-item] { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; }' +
-    '#pf-menu { position: fixed; inset: 0; z-index: 2147483646; background: rgba(0,0,0,.25); }' +
-    '#pf-menu .pf-opt { position: fixed; width: 64px; height: 64px; margin: -32px 0 0 -32px; border-radius: 50%;' +
-    '  background: #fff; color: #111; display: flex; align-items: center; justify-content: center; font-size: 26px;' +
-    '  box-shadow: 0 4px 14px rgba(0,0,0,.3); transition: transform .12s, background .12s; }' +
-    '#pf-menu .pf-opt.pf-hot { transform: scale(1.2); background: #111; color: #fff; }' +
-    '#pf-menu .pf-label { position: fixed; transform: translateX(-50%); padding: 4px 10px; border-radius: 10px;' +
-    '  background: #111; color: #fff; font: 600 14px -apple-system, sans-serif; white-space: nowrap; }' +
-    '#pf-menu .pf-dot { position: fixed; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%;' +
-    '  border: 3px solid #fff; box-shadow: 0 0 8px rgba(0,0,0,.4); }' +
+    // Indruk-effect: de pin veert iets in zolang je hem aanraakt
+    '[data-grid-item] > * { transition: transform .2s cubic-bezier(.2,.8,.3,1); }' +
+    '[data-grid-item].pf-press > * { transform: scale(.96); }' +
+    // Het menu, zoals in de Pinterest-app: donkere achtergrond, opgetilde pin, knoppen in een boog
+    '#pf-menu { position: fixed; inset: 0; z-index: 2147483646; background: rgba(0,0,0,0); transition: background .2s; }' +
+    '#pf-menu.pf-in { background: rgba(0,0,0,.6); }' +
+    '#pf-menu .pf-lift { position: fixed; object-fit: cover; border-radius: 16px; pointer-events: none;' +
+    '  box-shadow: 0 0 0 rgba(0,0,0,0); transition: transform .28s cubic-bezier(.2,.9,.3,1.2), box-shadow .28s; }' +
+    '#pf-menu.pf-in .pf-lift { transform: scale(1.05) rotate(-2.5deg); box-shadow: 0 24px 60px rgba(0,0,0,.55); }' +
+    '#pf-menu .pf-opt { position: fixed; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%;' +
+    '  background: rgba(28,28,28,.88); color: #fff; display: flex; align-items: center; justify-content: center;' +
+    '  box-shadow: 0 4px 16px rgba(0,0,0,.35); transform: scale(.4); opacity: 0;' +
+    '  transition: transform .22s cubic-bezier(.2,.9,.3,1.3), opacity .15s, background .12s, color .12s; }' +
+    '#pf-menu.pf-in .pf-opt { transform: scale(1); opacity: 1; }' +
+    '#pf-menu.pf-in .pf-opt.pf-hot { transform: scale(1.18); background: #fff; color: #111; }' +
+    '#pf-menu .pf-opt svg { width: 24px; height: 24px; fill: currentColor; }' +
+    '#pf-menu .pf-title { position: fixed; transform: translateX(-50%); color: #fff; opacity: 0;' +
+    '  font: 700 22px -apple-system, sans-serif; text-shadow: 0 2px 10px rgba(0,0,0,.5); transition: opacity .12s; white-space: nowrap; }' +
     // Tijdens een actie het "…"-menu van Pinterest onzichtbaar houden
     'html.pf-quiet [role="dialog"], html.pf-quiet [aria-modal="true"] { opacity: 0 !important; }' +
     '#pf-toast { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); z-index: 2147483647;' +
@@ -193,54 +208,85 @@ let pinSaveJS = #"""
 
   // --- Het ronde menu ---
 
+  // Icoontjes uit Googles Material-icoonset (Apache 2.0): punaise en doorgestreept oog
+  const ICONS = {
+    save: '<svg viewBox="0 0 24 24"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/></svg>',
+    hide: '<svg viewBox="0 0 24 24"><path d="M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65 0 1.66 1.34 3 3 3 .22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53-2.76 0-5-2.24-5-5 0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16c0-1.66-1.34-3-3-3l-.17.01z"/></svg>'
+  };
   const OPTIONS = [
-    { key: 'save', icon: '📌', text: 'Save' },
-    { key: 'hide', icon: '🚫', text: 'Hide' }
+    { key: 'save', text: 'Save' },
+    { key: 'hide', text: 'Hide' }
   ];
-  let menu = null;   // { el, item, opts: [{key, x, y, el, labelEl}], hot }
+  let menu = null;   // { el, item, opts: [{key, x, y, el, text}], hot, title }
 
   const openMenu = (item, x, y) => {
     native({ type: 'scroll', on: false });   // scrollen uit zolang het menu open is
     haptic();
+    item.classList.remove('pf-press');
     const el = document.createElement('div');
     el.id = 'pf-menu';
-    const dot = document.createElement('div');
-    dot.className = 'pf-dot'; dot.style.left = x + 'px'; dot.style.top = y + 'px';
-    el.appendChild(dot);
 
-    // Opties in een boog boven de vinger; bij de bovenrand eronder, bij de zijkant naar binnen
-    const R = 95;
-    const up = y > 180 ? -1 : 1;
-    const side = x < 140 ? 1 : (x > innerWidth - 140 ? -1 : 0);
-    const angles = side === 0 ? [-35, 35] : (side > 0 ? [10, 55] : [-55, -10]);
+    // Kopie van de pin-afbeelding die "opgetild" wordt
+    const img = item.querySelector('img');
+    if (img) {
+      const r = img.getBoundingClientRect();
+      const lift = document.createElement('img');
+      lift.className = 'pf-lift';
+      lift.src = img.currentSrc || img.src;
+      Object.assign(lift.style, { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+      el.appendChild(lift);
+    }
+
+    // Knoppen in een boog boven de vinger; bij de bovenrand eronder, bij de zijkant naar binnen
+    const R = 80;
+    const up = y > 170 ? -1 : 1;
+    const side = x < 120 ? 1 : (x > innerWidth - 120 ? -1 : 0);
+    const angles = side === 0 ? [-38, 38] : (side > 0 ? [15, 60] : [-60, -15]);
     const opts = OPTIONS.map((o, i) => {
       const a = angles[i] * Math.PI / 180;
       const ox = x + R * Math.sin(a), oy = y + up * R * Math.cos(a);
       const b = document.createElement('div');
-      b.className = 'pf-opt'; b.textContent = o.icon;
+      b.className = 'pf-opt';
+      b.innerHTML = ICONS[o.key];
       b.style.left = ox + 'px'; b.style.top = oy + 'px';
-      const l = document.createElement('div');
-      l.className = 'pf-label'; l.textContent = o.text;
-      l.style.left = ox + 'px'; l.style.top = (oy + (up < 0 ? -62 : 40)) + 'px';
-      l.style.visibility = 'hidden';
-      el.appendChild(b); el.appendChild(l);
-      return { key: o.key, x: ox, y: oy, el: b, labelEl: l };
+      b.style.transitionDelay = (i * 35) + 'ms';
+      el.appendChild(b);
+      return { key: o.key, x: ox, y: oy, el: b, text: o.text };
     });
+
+    // Label van de gekozen optie, boven de knoppen (of eronder als daar geen ruimte is)
+    const title = document.createElement('div');
+    title.className = 'pf-title';
+    const topMost = Math.min(...opts.map((o) => o.y));
+    const bottomMost = Math.max(...opts.map((o) => o.y));
+    title.style.left = Math.min(Math.max(x, 60), innerWidth - 60) + 'px';
+    title.style.top = (up < 0 ? Math.max(topMost - 72, 8) : bottomMost + 40) + 'px';
+    el.appendChild(title);
+
     document.body.appendChild(el);
-    menu = { el, item, opts, hot: null };
+    requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add('pf-in')));
+    menu = { el, item, opts, hot: null, title };
   };
 
   const closeMenu = () => {
-    if (menu) { menu.el.remove(); menu = null; }
+    if (menu) {
+      const el = menu.el;
+      el.classList.remove('pf-in');   // terug-animatie, daarna weghalen
+      el.style.pointerEvents = 'none';
+      setTimeout(() => el.remove(), 220);
+      menu = null;
+    }
     native({ type: 'scroll', on: true });
   };
 
   const setHot = (x, y) => {
     let hot = null;
-    for (const o of menu.opts) if (Math.hypot(o.x - x, o.y - y) < 45) hot = o;
+    for (const o of menu.opts) if (Math.hypot(o.x - x, o.y - y) < 42) hot = o;
     if (hot !== menu.hot) {
-      if (menu.hot) { menu.hot.el.classList.remove('pf-hot'); menu.hot.labelEl.style.visibility = 'hidden'; }
-      if (hot) { hot.el.classList.add('pf-hot'); hot.labelEl.style.visibility = 'visible'; haptic(); }
+      if (menu.hot) menu.hot.el.classList.remove('pf-hot');
+      if (hot) { hot.el.classList.add('pf-hot'); haptic(); }
+      menu.title.textContent = hot ? hot.text : '';
+      menu.title.style.opacity = hot ? '1' : '0';
       menu.hot = hot;
     }
   };
@@ -258,6 +304,17 @@ let pinSaveJS = #"""
 
   let pending = null;       // { timer, x, y }
   let swallowClick = false; // voorkomt dat loslaten na het menu de pin opent
+
+  // Indruk-effect pas na een korte vertraging, zodat het niet knippert als je gewoon scrolt
+  let pressed = null, pressTimer = null;
+  const pressStart = (item) => {
+    pressEnd();
+    pressTimer = setTimeout(() => { pressed = item; item.classList.add('pf-press'); }, 70);
+  };
+  const pressEnd = () => {
+    clearTimeout(pressTimer);
+    if (pressed) { pressed.classList.remove('pf-press'); pressed = null; }
+  };
 
   // Pinterest heeft zelf ook een "lang indrukken"-menu. Zodra ons menu opengaat, vertellen we
   // Pinterest dat de aanraking is geannuleerd, zodat zijn eigen timer stopt.
@@ -292,12 +349,14 @@ let pinSaveJS = #"""
     if (!item) return;
     const x = t.clientX, y = t.clientY;
     const target = e.target;
+    pressStart(item);
     pending = {
       x, y,
       timer: setTimeout(() => {
         pending = null;
         swallowClick = true;
         cancelPageGesture(target);
+        pressEnd();
         openMenu(item, x, y);
       }, HOLD_MS)
     };
@@ -307,12 +366,14 @@ let pinSaveJS = #"""
     const t = e.touches[0];
     if (pending && Math.hypot(t.clientX - pending.x, t.clientY - pending.y) > MOVE_CANCEL) {
       clearTimeout(pending.timer); pending = null;   // gewoon scrollen
+      pressEnd();
     }
     if (menu) { e.stopPropagation(); setHot(t.clientX, t.clientY); }
   }, { capture: true, passive: true });
 
   document.addEventListener('touchend', (e) => {
     if (pending) { clearTimeout(pending.timer); pending = null; }
+    setTimeout(pressEnd, 60);   // heel even laten staan, zodat een snelle tik ook zichtbaar veert
     if (!menu) return;
     e.preventDefault();
     e.stopPropagation();
@@ -323,6 +384,7 @@ let pinSaveJS = #"""
 
   document.addEventListener('touchcancel', () => {
     if (pending) { clearTimeout(pending.timer); pending = null; }
+    pressEnd();
   }, { capture: true, passive: true });
 
   // Klik die bij het loslaten hoort niet doorgeven aan de pin
