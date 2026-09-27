@@ -169,9 +169,30 @@ Volg de officiële documentatie op docs.sidestore.io. Het verloop in het kort:
 
 Het versienummer komt uit de git-tag (`v1.2` wordt 1.2) en het buildnummer uit `GITHUB_RUN_NUMBER`. Pas daarom `MARKETING_VERSION` in `project.yml` niet met de hand aan.
 
-### Kolommen / zoom
+### Tablet-site
 
-Pinterest kiest het aantal kolommen zelf, op basis van de viewportbreedte. `PinWebView` in `ContentView.swift` zet `pageZoom` per stand (`landscapeZoom` en `portraitZoom`). Zo krijg je minder, grotere kolommen, zoals in de Pinterest-app. Niels heeft een gewone iPad (liggend ongeveer 1180 pt breed; zonder zoom 5 kolommen, het doel is 4).
+De app vraagt Pinterests aanraakversie op (`preferredContentMode = .mobile`). Niels wil die altijd.
+
+### Kolommen (`Columns.swift`)
+
+In liggende stand is er een knop om te wisselen tussen **4 kolommen** (standaard) en **5 kolommen**. Niels heeft een gewone iPad, liggend 1180 pt breed.
+
+Bij 4 kolommen overschrijft een script Pinterests viewport-meta met `width=944, initial-scale=1.25`. Pinterest bouwt dan zelf 4 kolommen, en iOS schaalt het scherp op.
+
+**Niet gebruiken: `WKWebView.pageZoom`.** Daarbij bleef Pinterest voor 1180 bouwen, met 5 overlappende kolommen en zijwaarts scrollen tot gevolg. Pinterests Masonry-raster (Gestalt, open source) meet de breedte van zijn wrapper met `getBoundingClientRect`.
+
+### Lang indrukken (`PinSave.swift`)
+
+Lang indrukken op een pin opent een rond menu met twee opties: **Save** en **Hide**. Beide openen onzichtbaar Pinterests "…"-menu (`contextual-menu-button`) en tikken daarin op een optie:
+
+- **Save** kiest `save-repin-menu-link`. Daarna toont Pinterest de bordkeuze.
+- **Hide** kiest `see-less-option`.
+
+Vindt het script een knop niet, dan toont het een diagnosemelding met de aanwezige `data-test-id`'s.
+
+### Pin sluiten
+
+Op `/pin/`-pagina's gaat bovenaan omlaag swipen terug naar de feed (`goBack`). Pull-to-refresh staat daar uit. Zie de `Coordinator` in `ContentView.swift`.
 
 ---
 

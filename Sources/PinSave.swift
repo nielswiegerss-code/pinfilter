@@ -3,8 +3,9 @@ import WebKit
 
 // Lang indrukken op een pin opent een rond menu, zoals in de Pinterest-app.
 // Sleep naar een optie en laat los (of tik erop).
-// - Save: opent de pin en drukt op Pinterests eigen Save-knop (bordkeuze); daarna automatisch terug.
-// - Hide: kiest "Hide Pin" in het "…"-menu van de pin, zodat Pinterest er minder van laat zien.
+// Beide opties openen onzichtbaar Pinterests eigen "…"-menu van de pin en tikken daarin:
+// - Save: "Save", waarna Pinterest de bordkeuze toont (de pin gaat niet open).
+// - Hide: "See less", zodat Pinterest minder van dit soort pins laat zien.
 
 // Brug van JavaScript naar de app: trillen, en scrollen uit/aan zolang het menu open is
 final class NativeBridge: NSObject, WKScriptMessageHandler {
@@ -44,6 +45,8 @@ let pinSaveJS = #"""
     '  background: #111; color: #fff; font: 600 14px -apple-system, sans-serif; white-space: nowrap; }' +
     '#pf-menu .pf-dot { position: fixed; width: 44px; height: 44px; margin: -22px 0 0 -22px; border-radius: 50%;' +
     '  border: 3px solid #fff; box-shadow: 0 0 8px rgba(0,0,0,.4); }' +
+    // Tijdens een actie het "…"-menu van Pinterest onzichtbaar houden
+    'html.pf-quiet [role="dialog"], html.pf-quiet [aria-modal="true"] { opacity: 0 !important; }' +
     '#pf-toast { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); z-index: 2147483647;' +
     '  max-width: 90vw; padding: 10px 14px; border-radius: 12px; background: rgba(0,0,0,.85); color: #fff;' +
     '  font: 13px -apple-system, sans-serif; white-space: pre-wrap; }';
@@ -67,7 +70,7 @@ let pinSaveJS = #"""
 
   const label = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).trim().toLowerCase();
   const isSave = (el) => /^(opslaan|save|bewaren)$/.test(label(el));
-  const isHide = (el) => /^(hide pin|hide|pin verbergen|verbergen|verberg pin)$/.test(label(el));
+  const isLess = (el) => /^(see less|minder zien|minder hiervan)/.test(label(el));
   const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
   const clickables = (root) => [...root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], a, div[tabindex]')];
   const outsideGrid = (el) => !el.closest('[data-grid-item]') && visible(el);
@@ -125,10 +128,46 @@ let pinSaveJS = #"""
 
   const dialogOpen = () => [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')].some(visible);
 
+  // Opties in Pinterests "…"-menu van een pin (zichtbaar in de diagnose als data-test-id)
+  const SAVE_OPTION = ['[data-test-id="save-repin-menu-link"]'];
+  const LESS_OPTION = ['[data-test-id="see-less-option"]'];
+  const CLOSE_MENU = ['[aria-label="close context modal" i]'];
+
+  // Opent het "…"-menu van de pin onzichtbaar en tikt op een optie daarin.
+  // Geeft false terug als er geen "…"-knop is (dan kan de aanroeper iets anders proberen).
+  const viaPinMenu = async (item, selectors, test, what) => {
+    const menuBtn = pick(item, MENU_BUTTON_SELECTORS);
+    if (!menuBtn) return false;
+    const html = document.documentElement;
+    html.classList.add('pf-quiet');
+    try {
+      pressButton(menuBtn);
+      const option = await waitFor(() => pick(document, selectors, visible) ||
+                                         clickables(document).find((b) => outsideGrid(b) && test(b)), 2500);
+      if (!option) {
+        html.classList.remove('pf-quiet');
+        diagnose(document, what);
+        return true;
+      }
+      pressButton(option);
+      await sleep(250);
+      // Staat het menu nog open (optie sloot het niet zelf)? Dan netjes sluiten
+      if (pick(document, selectors, visible)) {
+        const close = pick(document, CLOSE_MENU, visible);
+        if (close) pressButton(close);
+      }
+      return true;
+    } finally {
+      html.classList.remove('pf-quiet');
+    }
+  };
+
   const actions = {
-    // Save: pin openen, op Pinterests Save-knop drukken (die opent de bordkeuze),
-    // en na het kiezen van een bord automatisch terug naar de feed
+    // Save: via het "…"-menu, zodat de pin niet opengaat; Pinterest toont dan de bordkeuze
     async save(item) {
+      if (await viaPinMenu(item, SAVE_OPTION, isSave, 'Save-optie')) return;
+
+      // Terugval: pin openen, daar op Save drukken, en na de bordkeuze terug naar de feed
       const startURL = location.href;
       if (!openPin(item)) { diagnose(item, 'Link naar pin'); return; }
       toast('Save…', 6000);
@@ -137,25 +176,18 @@ let pinSaveJS = #"""
       if (!btn) { diagnose(document, 'Save-knop op de pinpagina'); return; }
       const pinURL = location.href;
       pressButton(btn);
-      // Wacht tot de bordkeuze verschijnt, en daarna tot die weer dicht is
       if (await waitFor(dialogOpen, 1500)) {
         await waitFor(() => !dialogOpen(), 180000, 200);
         await sleep(400);
       } else {
-        await sleep(800);   // direct opgeslagen, zonder bordkeuze
+        await sleep(800);
       }
       if (location.href === pinURL) history.back();
     },
 
-    // Hide: het "…"-menu van de pin openen en daar "Hide Pin" kiezen
+    // Hide: via het "…"-menu direct "See less" kiezen, zodat Pinterest er minder van laat zien
     async hide(item) {
-      const menuBtn = pick(item, MENU_BUTTON_SELECTORS);
-      if (!menuBtn) { diagnose(item, '"…"-knop'); return; }
-      pressButton(menuBtn);
-      const option = await waitFor(() => clickables(document).find((b) => outsideGrid(b) && isHide(b)) ||
-                                         clickables(item).find((b) => visible(b) && isHide(b)), 2000);
-      if (!option) { diagnose(document, 'Hide-optie'); return; }
-      pressButton(option);
+      if (!(await viaPinMenu(item, LESS_OPTION, isLess, 'See less-optie'))) diagnose(item, '"…"-knop');
     }
   };
 

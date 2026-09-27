@@ -8,26 +8,18 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        PinterestView()
-            .ignoresSafeArea(edges: .bottom)
-            .overlay(alignment: .bottomTrailing) { ZoomLabPanel() }   // TIJDELIJK proefpaneel
-            .onChange(of: scenePhase) { _, phase in
+        GeometryReader { geo in
+            PinterestView()
+                .ignoresSafeArea(edges: .bottom)
+                .overlay(alignment: .bottomTrailing) {
+                    // Kolommenknop alleen liggend; staand bepaalt Pinterest het zelf
+                    if geo.size.width > geo.size.height { ColumnButton() }
+                }
+        }
+        .onChange(of: scenePhase) { _, phase in
                 // .inactive komt vóór .background, dus er is nog tijd om de cookies te bewaren
                 if phase != .active { CookieVault.saveBeforeSuspend() }
             }
-    }
-}
-
-// Inzoomen maakt de pagina voor Pinterest "smaller", waardoor het zelf minder en grotere kolommen
-// bouwt, zoals in de echte app. 1.0 = geen zoom. De liggende zoom komt nu tijdelijk uit het proefpaneel.
-let portraitZoom: CGFloat = 1.0
-
-// WKWebView die bij het draaien van de iPad automatisch de juiste zoom kiest
-final class PinWebView: WKWebView {
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let zoom = bounds.width > bounds.height ? ZoomLab.shared.effectivePageZoom : portraitZoom
-        if pageZoom != zoom { pageZoom = zoom }
     }
 }
 
@@ -38,6 +30,8 @@ struct PinterestView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()   // onthoudt je login
         config.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15"   // doe je voor als Safari
+        // Tablet-site: Pinterest stuurt zijn aanraakversie (balk onderin, "…"-menu op pins)
+        config.defaultWebpagePreferences.preferredContentMode = .mobile
 
         // Het filter draait vóór alle code van Pinterest zelf
         let script = WKUserScript(source: adFilterJS,
@@ -52,16 +46,10 @@ struct PinterestView: UIViewRepresentable {
         let bridge = NativeBridge()
         config.userContentController.add(bridge, name: "pfNative")
 
-        // TIJDELIJK: meet welke breedte Pinterest uitleest, en laat outerWidth meezoomen
-        config.userContentController.addUserScript(WKUserScript(source: widthProbeJS,
-                                                                injectionTime: .atDocumentStart,
-                                                                forMainFrameOnly: true))
-        // TIJDELIJK: tweede zoommethode via de viewport-instelling van de pagina
-        config.userContentController.addUserScript(WKUserScript(source: viewportZoomJS,
-                                                                injectionTime: .atDocumentStart,
-                                                                forMainFrameOnly: true))
+        // 4 of 5 kolommen in liggende stand (zie Columns.swift)
+        config.userContentController.addUserScript(ColumnSetting.shared.script)
 
-        let webView = PinWebView(frame: .zero, configuration: config)
+        let webView = WKWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true   // veeg terug zoals in een app
         webView.allowsLinkPreview = false   // lang indrukken is voor ons eigen menu, niet voor iOS-linkvoorbeeld
         webView.uiDelegate = context.coordinator
@@ -73,9 +61,9 @@ struct PinterestView: UIViewRepresentable {
                           action: #selector(Coordinator.reload(_:)),
                           for: .valueChanged)
         webView.scrollView.refreshControl = refresh
-        context.coordinator.webView = webView
+        context.coordinator.attach(webView, refresh: refresh)
         bridge.webView = webView
-        ZoomLab.shared.webView = webView
+        ColumnSetting.shared.webView = webView
 
         // Eerst de bewaarde login terugzetten, pas daarna de pagina laden
         Task {
@@ -90,6 +78,49 @@ struct PinterestView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
         weak var webView: WKWebView?
+        private var refresh: UIRefreshControl?
+        private var urlObservation: NSKeyValueObservation?
+        private var panStartedAtTop = false
+
+        func attach(_ webView: WKWebView, refresh: UIRefreshControl) {
+            self.webView = webView
+            self.refresh = refresh
+            // Pinterest wisselt van pagina zonder te herladen; de URL volgen we daarom zo
+            urlObservation = webView.observe(\.url) { [weak self] _, _ in
+                Task { @MainActor in self?.updateForPage() }
+            }
+            webView.scrollView.panGestureRecognizer.addTarget(self, action: #selector(handlePan(_:)))
+        }
+
+        private var isPinPage: Bool { webView?.url?.path.contains("/pin/") == true }
+
+        // Op een geopende pin is omlaag trekken "sluiten", dus daar geen verversen
+        private func updateForPage() {
+            guard let webView else { return }
+            let wanted = isPinPage ? nil : refresh
+            if webView.scrollView.refreshControl !== wanted { webView.scrollView.refreshControl = wanted }
+        }
+
+        // Geopende pin sluiten door bovenaan naar beneden te swipen
+        @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
+            guard let webView, isPinPage else { return }
+            let scrollView = webView.scrollView
+            let atTop = scrollView.contentOffset.y <= -scrollView.adjustedContentInset.top + 1
+            switch pan.state {
+            case .began:
+                panStartedAtTop = atTop
+            case .ended:
+                let move = pan.translation(in: scrollView)
+                let pulled = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
+                let downward = move.y > 100 && abs(move.x) < move.y * 0.6
+                if panStartedAtTop && downward && pulled > 60 && webView.canGoBack {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    webView.goBack()
+                }
+            default:
+                break
+            }
+        }
 
         @objc func reload(_ sender: UIRefreshControl) {
             webView?.reload()
@@ -99,19 +130,7 @@ struct PinterestView: UIViewRepresentable {
         // Na elke geladen pagina de cookies bewaren (dus ook direct na het inloggen)
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             Task { await CookieVault.save() }
-            // TIJDELIJK: meetwaarden verversen zodra Pinterest het raster heeft opgebouwd
-            Task {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                ZoomLab.shared.measure()
-            }
-        }
-
-        // TIJDELIJK: tablet-site (mobiele weergave) of desktop-site, gekozen in het proefpaneel
-        func webView(_ webView: WKWebView,
-                     decidePolicyFor navigationAction: WKNavigationAction,
-                     preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
-            preferences.preferredContentMode = ZoomLab.shared.mobile ? .mobile : .recommended
-            return (.allow, preferences)
+            updateForPage()
         }
 
         // Links die een nieuw venster willen openen, gewoon in dezelfde weergave laden
