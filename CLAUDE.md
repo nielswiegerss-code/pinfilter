@@ -198,6 +198,24 @@ Pinterest heeft een eigen long-press-menu. Zodra ons menu opengaat, stuurt het s
 
 Het script verbergt de inbox-knop in de onderbalk. Het herkent die aan een aria-label of href met inbox, message of notification, en aan de positie onderin het scherm.
 
+### Animaties (`Transitions.swift`)
+
+**Openen.** `transitionsJS` houdt een klik op een rasterpin maximaal 250 ms vast en stuurt `pinTap` met de afbeeldingsrect in punten. Native maakt een snapshot en laat Pinterest doorgaan (`window.__pfGo`). Daarna vraagt native steeds de grootste afbeelding op de pinpagina op en animeert de kopie daarheen.
+
+**Sluiten.** Na omlaag swipen maakt native een snapshot en roept `goBack` aan. Daarna vliegt de afbeelding naar de rasterpin met hetzelfde pin-ID.
+
+Het lang-indrukken-menu is opgemaakt zoals in de app: opgetilde kopie van de pin, donkere achtergrond, SVG-icoontjes en een label bovenin.
+
+### Pagina-analyse
+
+Lang drukken op de kolommenknop opent een sheet met:
+
+- de viewport- en schermmaten
+- de te brede elementen
+- een boom van `data-test-id`'s met maten en stijl
+
+Niels maakt daar screenshots van als Claude de ingelogde paginastructuur nodig heeft.
+
 ### Verlanglijst (van Niels, nog te doen)
 
 - externe links openen in een los venster (SFSafariViewController)
