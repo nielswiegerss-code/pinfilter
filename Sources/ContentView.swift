@@ -63,6 +63,11 @@ struct PinterestView: UIViewRepresentable {
         webView.allowsLinkPreview = false   // lang indrukken is voor ons eigen menu, niet voor iOS-linkvoorbeeld
         webView.uiDelegate = context.coordinator
         webView.navigationDelegate = context.coordinator
+        // Achtergrond volgt licht/donker, zodat er bij laden of verversen niets wit flitst
+        webView.isOpaque = false
+        webView.backgroundColor = .systemBackground
+        webView.scrollView.backgroundColor = .systemBackground
+        webView.underPageBackgroundColor = .systemBackground
 
         // Omlaag trekken om te verversen
         let refresh = UIRefreshControl()
@@ -86,12 +91,12 @@ struct PinterestView: UIViewRepresentable {
     func updateUIView(_ uiView: WKWebView, context: Context) {}
 
     @MainActor
-    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, UIGestureRecognizerDelegate {
         weak var webView: WKWebView?
         let transitions = PinTransitions()
         private var refresh: UIRefreshControl?
         private var urlObservation: NSKeyValueObservation?
-        private var panStartedAtTop = false
+        private let dismissPan = UIPanGestureRecognizer()
 
         func attach(_ webView: WKWebView, refresh: UIRefreshControl) {
             self.webView = webView
@@ -101,7 +106,10 @@ struct PinterestView: UIViewRepresentable {
             urlObservation = webView.observe(\.url) { [weak self] _, _ in
                 Task { @MainActor in self?.updateForPage() }
             }
-            webView.scrollView.panGestureRecognizer.addTarget(self, action: #selector(handlePan(_:)))
+            // Eigen sleepgebaar om een geopende pin weg te swipen (zie Transitions.swift)
+            dismissPan.addTarget(self, action: #selector(handleDismissPan(_:)))
+            dismissPan.delegate = self
+            webView.addGestureRecognizer(dismissPan)
         }
 
         private var isPinPage: Bool { webView?.url?.path.contains("/pin/") == true }
@@ -111,6 +119,8 @@ struct PinterestView: UIViewRepresentable {
             guard let webView else { return }
             let wanted = isPinPage ? nil : refresh
             if webView.scrollView.refreshControl !== wanted { webView.scrollView.refreshControl = wanted }
+            // Op een pin geen "elastiek" bovenaan: daar neemt het wegswipen het over
+            webView.scrollView.bounces = !isPinPage
             transitions.pageChanged()
 
             // Na de kolommenwissel (andere viewport) kan de pagina zijwaarts verschoven blijven staan,
@@ -125,24 +135,40 @@ struct PinterestView: UIViewRepresentable {
             }
         }
 
-        // Geopende pin sluiten door bovenaan naar beneden te swipen
-        @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
-            guard let webView, isPinPage else { return }
-            let scrollView = webView.scrollView
-            let atTop = scrollView.contentOffset.y <= -scrollView.adjustedContentInset.top + 1
+        // Geopende pin wegswipen: bovenaan de pin naar beneden slepen
+        @objc private func handleDismissPan(_ pan: UIPanGestureRecognizer) {
+            guard let webView else { return }
+            let t = pan.translation(in: webView)
             switch pan.state {
             case .began:
-                panStartedAtTop = atTop
+                webView.scrollView.isScrollEnabled = false   // de pagina eronder niet laten meescrollen
+                transitions.beginDrag()
+            case .changed:
+                transitions.updateDrag(translation: t)
             case .ended:
-                let move = pan.translation(in: scrollView)
-                let pulled = -(scrollView.contentOffset.y + scrollView.adjustedContentInset.top)
-                let downward = move.y > 100 && abs(move.x) < move.y * 0.6
-                if panStartedAtTop && downward && pulled > 60 && webView.canGoBack {
-                    transitions.dismissPin(pulled: pulled)   // met terugvlieg-animatie
-                }
+                webView.scrollView.isScrollEnabled = true
+                transitions.endDrag(translation: t, velocity: pan.velocity(in: webView))
+            case .cancelled, .failed:
+                webView.scrollView.isScrollEnabled = true
+                transitions.endDrag(translation: .zero, velocity: .zero)
             default:
                 break
             }
+        }
+
+        // Het sleepgebaar start alleen op een pinpagina, helemaal bovenaan, bij een beweging omlaag
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard gestureRecognizer === dismissPan else { return true }
+            guard let webView, isPinPage, webView.canGoBack, webView.scrollView.isScrollEnabled else { return false }
+            let scrollView = webView.scrollView
+            let atTop = scrollView.contentOffset.y <= -scrollView.adjustedContentInset.top + 1
+            let v = dismissPan.velocity(in: webView)
+            return atTop && v.y > 0 && abs(v.x) < v.y
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
 
         @objc func reload(_ sender: UIRefreshControl) {
@@ -177,12 +203,17 @@ let adFilterJS = #"""
   const SHOW_COUNTER = true;
   let removed = 0;
 
-  // Een item is een advertentie als het (of zijn .node) een promotie-ID heeft
+  // Een item is een advertentie als het (of zijn .node) een promotie-ID heeft.
+  // Pinterests oudere data gebruikt snake_case (pin_promotion_id, is_promoted); de nieuwere
+  // GraphQL-data (o.a. "More to explore" onder een geopende pin) camelCase: pinPromotionId,
+  // isPromoted, en "promoter" (de adverteerder; bij gewone pins null).
+  const adFlags = (x) => !!(x.pin_promotion_id || x.is_promoted === true ||
+    x.pinPromotionId || x.isPromoted === true || (x.promoter && typeof x.promoter === 'object'));
   const isPromoted = (o) => {
     if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
-    if (o.pin_promotion_id || o.is_promoted === true) return true;
+    if (adFlags(o)) return true;
     const n = o.node;
-    return !!(n && typeof n === 'object' && (n.pin_promotion_id || n.is_promoted === true));
+    return !!(n && typeof n === 'object' && !Array.isArray(n) && adFlags(n));
   };
 
   // Loop recursief door de data en haal advertenties weg
@@ -218,7 +249,7 @@ let adFilterJS = #"""
   document.addEventListener('DOMContentLoaded', updateBadge);
 
   // 1. JSON.parse: hier komen de beginstatus van de pagina en de meeste API-data langs
-  const MARKERS = /pin_promotion_id|"is_promoted":\s*true/;
+  const MARKERS = /pin_promotion_id|"is_promoted":\s*true|"isPromoted":\s*true|"pinPromotionId":\s*"?[1-9]|"promoter":\s*\{/;
   const originalParse = JSON.parse;
   JSON.parse = function (text, reviver) {
     const result = originalParse.call(this, text, reviver);

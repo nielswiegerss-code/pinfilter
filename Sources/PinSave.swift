@@ -25,7 +25,8 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
             // Tik op een pin in het raster: open-animatie starten (zie Transitions.swift)
             let n = { (key: String) in CGFloat((body[key] as? NSNumber)?.doubleValue ?? 0) }
             let rect = CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h"))
-            MainActor.assumeIsolated { transitions?.pinTapped(rect: rect) }
+            let pinId = (body["pinId"] as? String) ?? ""
+            MainActor.assumeIsolated { transitions?.pinTapped(rect: rect, pinId: pinId) }
         default:
             break
         }

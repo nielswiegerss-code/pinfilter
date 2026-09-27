@@ -24,9 +24,13 @@ final class ColumnSetting: ObservableObject {
     func toggle() {
         columns = columns == 4 ? 5 : 4
         UserDefaults.standard.set(columns, forKey: "columns")
-        // Het script in de pagina leest de waarde bij het laden, dus opslaan en herladen
-        webView?.evaluateJavaScript("localStorage.setItem('pfZoom', '\(zoomFactor)')") { [weak self] _, _ in
-            self?.webView?.reload()
+        // Direct in de open pagina omschakelen; alleen als dat niet lukt opslaan en herladen
+        let zoom = zoomFactor
+        webView?.evaluateJavaScript("window.__pfSetZoom ? window.__pfSetZoom(\(zoom)) : ''") { [weak self] result, _ in
+            guard (result as? String) != "ok" else { return }
+            self?.webView?.evaluateJavaScript("localStorage.setItem('pfZoom', '\(zoom)')") { _, _ in
+                self?.webView?.reload()
+            }
         }
     }
 
@@ -144,7 +148,6 @@ private let columnsJS = #"""
 (() => {
   let factor = PF_APP_ZOOM;
   try { const v = parseFloat(localStorage.getItem('pfZoom')); if (v) factor = v; } catch (e) {}
-  if (factor === 1) return;   // 5 kolommen: Pinterest gewoon zijn gang laten gaan
 
   const isLandscape = () => {
     const o = screen.orientation && screen.orientation.type;
@@ -161,17 +164,39 @@ private let columnsJS = #"""
     return 'width=' + width + ', initial-scale=' + f + ', minimum-scale=' + f + ', maximum-scale=' + f + ', user-scalable=no';
   };
   const apply = () => {
-    const c = content();
-    if (!document.head || !c) return;
+    if (!document.head) return;
     let metas = [...document.head.querySelectorAll('meta[name="viewport"]')];
+    // Heeft Pinterest de regel zelf veranderd? Dan is dat de nieuwe "eigen" waarde van Pinterest
+    for (const m of metas) if (m.dataset.pfSet !== undefined && m.content !== m.dataset.pfSet) m.dataset.pfOriginal = m.content;
+
+    // 5 kolommen: Pinterests eigen regel gebruiken (of terugzetten als wij hem eerder veranderden)
+    if (factor === 1) {
+      let changed = false;
+      for (const m of metas) {
+        if (m.dataset.pfOriginal !== undefined && m.content !== m.dataset.pfOriginal) {
+          m.content = m.dataset.pfSet = m.dataset.pfOriginal;
+          changed = true;
+        }
+      }
+      if (changed) for (const ms of [60, 320]) setTimeout(() => window.dispatchEvent(new Event('resize')), ms);
+      return;
+    }
+
+    const c = content();
+    if (!c) return;
     if (!metas.length) {
       const m = document.createElement('meta');
       m.name = 'viewport';
+      m.dataset.pfOriginal = 'width=device-width, initial-scale=1';
       document.head.appendChild(m);
       metas = [m];
     }
     let changed = false;
-    for (const m of metas) if (m.content !== c) { m.content = c; changed = true; }
+    for (const m of metas) {
+      if (m.dataset.pfOriginal === undefined) m.dataset.pfOriginal = m.content;
+      if (m.content !== c) { m.content = c; changed = true; }
+      m.dataset.pfSet = c;
+    }
     // Pinterest kiest zijn opmaak (smal of breed) opnieuw bij een "resize"-signaal, maar een
     // gewijzigde viewport geeft dat signaal niet vanzelf. Zonder dit bleef een geopende pin in de
     // smalle opmaak staan en werd de afbeelding afgesneden. Twee keer, omdat Pinterest even wacht.
@@ -199,5 +224,13 @@ private let columnsJS = #"""
   }
   window.addEventListener('popstate', apply);
   if (screen.orientation) screen.orientation.addEventListener('change', () => setTimeout(apply, 50));
+
+  // Wisselen tussen 4 en 5 kolommen zonder de pagina te herladen (geen witte flits)
+  window.__pfSetZoom = (f) => {
+    factor = f;
+    try { localStorage.setItem('pfZoom', String(f)); } catch (e) {}
+    apply();
+    return 'ok';
+  };
 })();
 """#

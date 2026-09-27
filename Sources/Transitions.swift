@@ -5,27 +5,32 @@ import WebKit
 //
 // Openen: bij een tik op een pin houdt JavaScript de klik heel even vast en meldt waar de
 // afbeelding staat. De app maakt een momentopname van het scherm en van de afbeelding, laat
-// Pinterest de pin openen en laat de kopie van de afbeelding naar de grote afbeelding op de
-// pinpagina zoomen. Onder de momentopname bouwt Pinterest intussen de pagina op, zodat je het
-// verspringen (o.a. door de kolommenwissel) niet ziet.
+// Pinterest de pin openen en laat de kopie naar de grote afbeelding op de pinpagina zoomen.
+// Onder de momentopname bouwt Pinterest intussen de pagina op, zodat je geen verspringen ziet.
 //
-// Sluiten: momentopname van de pinpagina, terug naar de feed, en de afbeelding vliegt terug
-// naar haar plek in het raster.
+// Sluiten: bovenaan een pin omlaag slepen. De pinpagina volgt je vinger als een kaart die krimpt;
+// daarachter zie je de feed (de momentopname van het openen). Ver genoeg losgelaten: de afbeelding
+// vliegt naar haar plek in de feed, en de echte feed wordt onzichtbaar opgebouwd en daarna getoond.
 @MainActor
 final class PinTransitions {
     weak var webView: WKWebView?
     private var overlay: UIView?
 
-    // Plek van de grote afbeelding op de huidige pinpagina (voor de sluit-animatie)
+    // Plek van de grote afbeelding op de huidige pinpagina
     private var closeupImage: (path: String, rect: CGRect)?
+
+    // Per geopende pin: hoe het scherm eruitzag vóór het openen, en waar de pin daar stond
+    private var openedFrom: [String: (screen: UIView, rect: CGRect)] = [:]
+    private var openOrder: [String] = []
 
     // MARK: Openen
 
-    func pinTapped(rect: CGRect) {
+    func pinTapped(rect: CGRect, pinId: String) {
         guard let webView, overlay == nil, rect.width > 20, rect.height > 20 else { go(); return }
 
         let container = UIView(frame: webView.bounds)
-        if let screen = webView.snapshotView(afterScreenUpdates: false) { container.addSubview(screen) }
+        let screen = webView.snapshotView(afterScreenUpdates: false)
+        if let screen { container.addSubview(screen) }
         let backdrop = UIView(frame: container.bounds)
         backdrop.backgroundColor = .systemBackground
         backdrop.alpha = 0
@@ -37,6 +42,14 @@ final class PinTransitions {
         container.addSubview(image)
         webView.addSubview(container)
         overlay = container
+
+        // Bewaar het scherm van vóór het openen, voor de sluit-animatie
+        if !pinId.isEmpty, let keep = webView.snapshotView(afterScreenUpdates: false) {
+            openedFrom[pinId] = (keep, rect)
+            openOrder.removeAll { $0 == pinId }
+            openOrder.append(pinId)
+            while openOrder.count > 6 { openedFrom[openOrder.removeFirst()] = nil }
+        }
 
         go()   // nu mag Pinterest de pin openen, onder de momentopname
 
@@ -65,55 +78,136 @@ final class PinTransitions {
         webView?.evaluateJavaScript("window.__pfGo && window.__pfGo()", completionHandler: nil)
     }
 
-    // MARK: Sluiten
+    // MARK: Sluiten door te slepen
 
-    // Aangeroepen na omlaag swipen op een pinpagina. `pulled` is hoe ver de pagina omlaag getrokken is.
-    func dismissPin(pulled: CGFloat) {
-        guard let webView else { return }
-        guard overlay == nil, webView.canGoBack else { webView.goBack(); return }
-        let pinId = Self.pinId(from: webView.url?.path)
+    private struct Drag {
+        let container: UIView
+        let dim: UIView
+        let card: UIView
+        let image: UIView?
+        let imageRect: CGRect
+        let pinId: String
+        let target: CGRect?
+        let hasFeedSnapshot: Bool
+    }
+    private var drag: Drag?
+
+    func beginDrag() {
+        guard let webView, overlay == nil, drag == nil, webView.canGoBack,
+              let card = webView.snapshotView(afterScreenUpdates: false) else { return }
+        let path = webView.url?.path ?? ""
+        let pinId = Self.pinId(from: path)
 
         let container = UIView(frame: webView.bounds)
-        let screen = webView.snapshotView(afterScreenUpdates: false)
-        if let screen { container.addSubview(screen) }
+        container.backgroundColor = .black
+        // Achtergrond: de feed zoals die was toen de pin werd geopend (als we die hebben)
+        let from = openedFrom[pinId]
+        if let feed = from?.screen {
+            feed.frame = container.bounds
+            feed.alpha = 1
+            container.addSubview(feed)
+        }
+        let dim = UIView(frame: container.bounds)
+        dim.backgroundColor = .black
+        dim.alpha = 0.55
+        container.addSubview(dim)
+
+        card.frame = container.bounds
+        card.clipsToBounds = true
+        container.addSubview(card)
+
         var image: UIView?
         var imageRect = CGRect.zero
-        if let info = closeupImage, info.path == webView.url?.path {
-            imageRect = info.rect.offsetBy(dx: 0, dy: max(pulled, 0))
-            image = webView.resizableSnapshotView(from: imageRect, afterScreenUpdates: false, withCapInsets: .zero)
-            if let image {
-                image.frame = imageRect
-                image.layer.cornerRadius = 16
-                image.clipsToBounds = true
-                container.addSubview(image)
-            }
+        if let info = closeupImage, info.path == path,
+           let snap = webView.resizableSnapshotView(from: info.rect, afterScreenUpdates: false, withCapInsets: .zero) {
+            imageRect = info.rect
+            snap.frame = imageRect
+            snap.layer.cornerRadius = 16
+            snap.clipsToBounds = true
+            card.addSubview(snap)   // beweegt mee met de kaart
+            image = snap
         }
+
         webView.addSubview(container)
         overlay = container
+        drag = Drag(container: container, dim: dim, card: card, image: image, imageRect: imageRect,
+                    pinId: pinId, target: from?.rect, hasFeedSnapshot: from != nil)
+    }
 
+    func updateDrag(translation t: CGPoint) {
+        guard let drag else { return }
+        let dy = max(t.y, 0)
+        let progress = min(dy / 420, 1)
+        let scale = 1 - 0.32 * progress
+        drag.card.transform = CGAffineTransform(translationX: t.x * 0.6, y: dy * 0.9).scaledBy(x: scale, y: scale)
+        drag.card.layer.cornerRadius = 28 * progress / scale
+        drag.dim.alpha = 0.55 * (1 - progress)
+    }
+
+    func endDrag(translation t: CGPoint, velocity v: CGPoint) {
+        guard let drag, let webView else { return }
+        let commit = t.y > 130 || (v.y > 700 && t.y > 30)
+        if !commit {
+            // Terugveren: niets veranderd, overlay weg
+            UIView.animate(withDuration: 0.32, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0) {
+                drag.card.transform = .identity
+                drag.card.layer.cornerRadius = 0
+                drag.dim.alpha = 0.55
+            } completion: { _ in
+                drag.container.removeFromSuperview()
+                if self.overlay === drag.container { self.overlay = nil }
+            }
+            self.drag = nil
+            return
+        }
+
+        self.drag = nil
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        webView.goBack()
+        webView.goBack()   // de echte feed wordt nu onder de overlay opgebouwd
 
-        // De pinpagina vervaagt, zodat de feed eronder zichtbaar wordt
-        UIView.animate(withDuration: 0.28, delay: 0.08, options: .curveEaseOut) { screen?.alpha = 0 }
+        // Afbeelding uit de kaart halen, zodat hij los kan vliegen
+        var flying: UIView?
+        var flyingFrom = CGRect.zero
+        if let image = drag.image {
+            flyingFrom = image.convert(image.bounds, to: drag.container)
+            let copy = image
+            copy.removeFromSuperview()
+            copy.transform = .identity
+            copy.frame = flyingFrom
+            drag.container.addSubview(copy)
+            flying = copy
+        }
+
+        UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseOut) {
+            drag.card.alpha = 0
+            drag.dim.alpha = 0
+        }
 
         Task {
-            let target = pinId.isEmpty ? nil
-                : await waitForRect(Self.gridImageJS(pinId: pinId), timeout: 1.4, minWait: switchDelay * 0.7)
-            if let image, let target {
-                UIView.animate(withDuration: 0.36, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0) {
-                    Self.move(image, from: imageRect, to: target)
-                } completion: { _ in
-                    self.fadeOut(container, duration: 0.12)
+            // Waar gaat de afbeelding heen? Bij voorkeur de plek van het openen (op de momentopname)
+            var target = drag.target
+            if !drag.hasFeedSnapshot, !drag.pinId.isEmpty {
+                target = await waitForRect(Self.gridImageJS(pinId: drag.pinId), timeout: 1.4, minWait: switchDelay * 0.7)
+            }
+            if let flying, let target {
+                await withCheckedContinuation { done in
+                    UIView.animate(withDuration: 0.38, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0) {
+                        Self.move(flying, from: flyingFrom, to: target)
+                    } completion: { _ in done.resume() }
                 }
-            } else {
+            } else if let flying {
                 UIView.animate(withDuration: 0.25) {
-                    image?.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
-                    image?.alpha = 0
-                } completion: { _ in
-                    self.fadeOut(container, duration: 0.1)
+                    flying.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+                    flying.alpha = 0
                 }
             }
+            // Wacht tot de echte feed klaar staat, en laat hem dan zien
+            if drag.hasFeedSnapshot, !drag.pinId.isEmpty {
+                _ = await waitForRect(Self.gridImageJS(pinId: drag.pinId), timeout: 1.2, minWait: switchDelay * 0.7)
+            } else {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            fadeOut(drag.container, duration: 0.18)
         }
     }
 
@@ -181,7 +275,7 @@ final class PinTransitions {
         return CGRect(x: x, y: y, width: w, height: h)
     }
 
-    private static func pinId(from path: String?) -> String {
+    static func pinId(from path: String?) -> String {
         guard let path, let range = path.range(of: "/pin/") else { return "" }
         return String(path[range.upperBound...].prefix { $0.isNumber })
     }
@@ -206,7 +300,7 @@ final class PinTransitions {
     private static func gridImageJS(pinId: String) -> String {
         """
         (() => {
-          if (location.pathname.includes('/pin/')) return '';
+          if (location.pathname.includes('/pin/\(pinId)/')) return '';
           const a = document.querySelector('[data-grid-item] a[href*="/pin/\(pinId)/"]');
           const item = a && a.closest('[data-grid-item]');
           const img = item && item.querySelector('img');
@@ -241,9 +335,10 @@ let transitionsJS = #"""
     e.preventDefault();
     e.stopPropagation();
     const s = (window.visualViewport && visualViewport.scale) || 1;
+    const pinId = ((a.getAttribute('href') || '').split('/pin/')[1] || '').split('/')[0];
     let went = false;
     window.__pfGo = () => { if (went) return; went = true; skipNext = true; a.click(); };
-    native({ type: 'pinTap', x: r.left * s, y: r.top * s, w: r.width * s, h: r.height * s });
+    native({ type: 'pinTap', x: r.left * s, y: r.top * s, w: r.width * s, h: r.height * s, pinId });
     setTimeout(() => window.__pfGo && window.__pfGo(), 250);
   }, true);
 })();
