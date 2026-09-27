@@ -179,6 +179,8 @@ In liggende stand is er een knop om te wisselen tussen **4 kolommen** (standaard
 
 Bij 4 kolommen overschrijft een script Pinterests viewport-meta met `width=944, initial-scale=1.25`. Pinterest bouwt dan zelf 4 kolommen, en iOS schaalt het scherp op.
 
+Op `/pin/`-pagina's staat dit uit, anders valt de pin aan de zijkant buiten beeld. Het script volgt `pushState` en `popstate`.
+
 **Niet gebruiken: `WKWebView.pageZoom`.** Daarbij bleef Pinterest voor 1180 bouwen, met 5 overlappende kolommen en zijwaarts scrollen tot gevolg. Pinterests Masonry-raster (Gestalt, open source) meet de breedte van zijn wrapper met `getBoundingClientRect`.
 
 ### Lang indrukken (`PinSave.swift`)
@@ -189,6 +191,20 @@ Lang indrukken op een pin opent een rond menu met twee opties: **Save** en **Hid
 - **Hide** kiest `see-less-option`.
 
 Vindt het script een knop niet, dan toont het een diagnosemelding met de aanwezige `data-test-id`'s.
+
+Pinterest heeft een eigen long-press-menu. Zodra ons menu opengaat, stuurt het script `pointercancel` en `touchcancel` naar het doelelement. Daarna stopt het de verdere touch- en pointer-events van dat gebaar (`stopPropagation`).
+
+### Layout-aanpassingen (`PageTweaks.swift`)
+
+Het script verbergt de inbox-knop in de onderbalk. Het herkent die aan een aria-label of href met inbox, message of notification, en aan de positie onderin het scherm.
+
+### Verlanglijst (van Niels, nog te doen)
+
+- externe links openen in een los venster (SFSafariViewController)
+- donkere modus
+- snellere start met een laadindicator
+- een mooiere layout voor een geopende pin, zoals in de app (wacht op screenshots)
+- daarna: animaties, layout en snelheid
 
 ### Pin sluiten
 

@@ -259,6 +259,26 @@ let pinSaveJS = #"""
   let pending = null;       // { timer, x, y }
   let swallowClick = false; // voorkomt dat loslaten na het menu de pin opent
 
+  // Pinterest heeft zelf ook een "lang indrukken"-menu. Zodra ons menu opengaat, vertellen we
+  // Pinterest dat de aanraking is geannuleerd, zodat zijn eigen timer stopt.
+  const cancelPageGesture = (target) => {
+    try { target.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerType: 'touch', isPrimary: true })); } catch (e) {}
+    try {
+      const ev = new Event('touchcancel', { bubbles: true, cancelable: false });
+      for (const k of ['touches', 'targetTouches', 'changedTouches']) Object.defineProperty(ev, k, { value: [] });
+      target.dispatchEvent(ev);
+    } catch (e) {}
+  };
+
+  // Zolang ons menu open is, krijgt Pinterest de rest van de vingerbeweging niet te zien
+  for (const type of ['pointermove', 'pointerup', 'pointerdown']) {
+    document.addEventListener(type, (e) => { if (menu) e.stopPropagation(); }, true);
+  }
+  // Systeem-/paginamenu bij lang indrukken op een pin tegenhouden
+  document.addEventListener('contextmenu', (e) => {
+    if (menu || pending || (e.target.closest && e.target.closest('[data-grid-item]'))) { e.preventDefault(); e.stopPropagation(); }
+  }, true);
+
   document.addEventListener('touchstart', (e) => {
     if (pending) { clearTimeout(pending.timer); pending = null; }
     if (e.touches.length !== 1) return;
@@ -271,9 +291,15 @@ let pinSaveJS = #"""
     const item = e.target.closest && e.target.closest('[data-grid-item]');
     if (!item) return;
     const x = t.clientX, y = t.clientY;
+    const target = e.target;
     pending = {
       x, y,
-      timer: setTimeout(() => { pending = null; swallowClick = true; openMenu(item, x, y); }, HOLD_MS)
+      timer: setTimeout(() => {
+        pending = null;
+        swallowClick = true;
+        cancelPageGesture(target);
+        openMenu(item, x, y);
+      }, HOLD_MS)
     };
   }, { capture: true, passive: true });
 
@@ -282,13 +308,14 @@ let pinSaveJS = #"""
     if (pending && Math.hypot(t.clientX - pending.x, t.clientY - pending.y) > MOVE_CANCEL) {
       clearTimeout(pending.timer); pending = null;   // gewoon scrollen
     }
-    if (menu) setHot(t.clientX, t.clientY);
+    if (menu) { e.stopPropagation(); setHot(t.clientX, t.clientY); }
   }, { capture: true, passive: true });
 
   document.addEventListener('touchend', (e) => {
     if (pending) { clearTimeout(pending.timer); pending = null; }
     if (!menu) return;
     e.preventDefault();
+    e.stopPropagation();
     if (menu.hot) run(menu.hot.key, menu.item);
     else if (!swallowClick) closeMenu();   // tik naast de opties: sluiten
     swallowClick = false;                  // na eerste keer loslaten blijft het menu open voor tikken

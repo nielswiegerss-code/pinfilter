@@ -69,7 +69,9 @@ private let columnsJS = #"""
   const content = () => {
     const long = Math.max(screen.width, screen.height), short = Math.min(screen.width, screen.height);
     if (!short) return null;   // schermmaat onbekend: niets aanpassen
-    const f = isLandscape() ? factor : 1;
+    // Alleen het raster verkleinen; een geopende pin rekent met de echte breedte en viel anders buiten beeld
+    const onPinPage = location.pathname.includes('/pin/');
+    const f = isLandscape() && !onPinPage ? factor : 1;
     const width = Math.round((isLandscape() ? long : short) / f);
     return 'width=' + width + ', initial-scale=' + f + ', minimum-scale=' + f + ', maximum-scale=' + f + ', user-scalable=no';
   };
@@ -98,6 +100,12 @@ private let columnsJS = #"""
   docObserver.observe(document, { childList: true, subtree: true });
   document.addEventListener('DOMContentLoaded', () => { watchHead(); apply(); });
   window.addEventListener('orientationchange', () => setTimeout(apply, 50));
+  // Pinterest wisselt van pagina zonder te herladen: na elke paginawissel opnieuw toepassen
+  for (const fn of ['pushState', 'replaceState']) {
+    const original = history[fn];
+    history[fn] = function (...args) { const r = original.apply(this, args); apply(); return r; };
+  }
+  window.addEventListener('popstate', apply);
   if (screen.orientation) screen.orientation.addEventListener('change', () => setTimeout(apply, 50));
 })();
 """#

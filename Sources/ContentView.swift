@@ -46,6 +46,10 @@ struct PinterestView: UIViewRepresentable {
         let bridge = NativeBridge()
         config.userContentController.add(bridge, name: "pfNative")
 
+        // Kleine layoutaanpassingen, zoals de inbox-knop verbergen (zie PageTweaks.swift)
+        config.userContentController.addUserScript(WKUserScript(source: pageTweaksJS,
+                                                                injectionTime: .atDocumentEnd,
+                                                                forMainFrameOnly: true))
         // 4 of 5 kolommen in liggende stand (zie Columns.swift)
         config.userContentController.addUserScript(ColumnSetting.shared.script)
 
