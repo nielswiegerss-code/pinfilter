@@ -36,6 +36,10 @@ Linksonder staat een teller (`SHOW_COUNTER`).
 
 Getest op echte data van een openbare pinpagina, waarin niets werd weggehaald, en op nagebootste feeds.
 
+In v1.12 kwamen er "doorgeplaatste" advertenties bij (geopend tonen ze "Ad"): `is_downstream_promotion`/`isDownstreamPromotion === true` en `adData`/`ad_data` als object. `sponsorship` (betaald partnerschap) wordt bewust niet gefilterd.
+
+`adProbeJS` draait ná het filter. Het toont in de pagina-analyse welke advertentievelden van de geopende pin erdoor kwamen.
+
 **Waarom deze aanpak.** CSS-verbergen laat gaten achter, omdat Pinterest de pins al met JavaScript absoluut heeft gepositioneerd. Safari-extensies draaien niet in webapps op het beginscherm. Door de data te filteren vóórdat het raster wordt gebouwd, ontstaan er geen gaten. **Verander de filterlogica niet** tenzij een test op de iPad een probleem laat zien.
 
 ## Randvoorwaarden en besluiten
@@ -229,7 +233,9 @@ Het script maakt de opmaak alleen opnieuw als het pad, de breedte of de hoogte v
 
 De webview-achtergrond is `.systemBackground` met `isOpaque = false`, zodat er niets wit flitst.
 
-Het lang-indrukken-menu is opgemaakt zoals in de app: opgetilde kopie van de pin, donkere achtergrond, SVG-icoontjes en een label bovenin.
+**Lang-indrukken-menu (v1.12, `LongPressMenu.swift`).** iOS tekent het menu zelf: een `UILongPressGestureRecognizer` van 0,45 s op de webview. `window.__pfMenuAt(x, y)` in `pinSaveJS` geeft de afbeeldingsrect van de pin onder de vinger en schermt het gebaar af voor Pinterest. Native tekent daarna het menu: de opgetilde snapshot, een dim-laag, SF Symbols en het label. Een keuze gaat naar `window.__pfRun(key)`.
+
+**Open-animatie.** Die vliegt direct naar `predictedCloseupRect`, dat is gebaseerd op onze eigen pin-opmaak, en schuift daarna bij naar de echte plek.
 
 ### Pagina-analyse
 
