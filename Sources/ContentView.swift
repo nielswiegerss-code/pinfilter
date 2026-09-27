@@ -10,6 +10,7 @@ struct ContentView: View {
     var body: some View {
         PinterestView()
             .ignoresSafeArea(edges: .bottom)
+            .overlay(alignment: .bottomTrailing) { ZoomLabPanel() }   // TIJDELIJK proefpaneel
             .onChange(of: scenePhase) { _, phase in
                 // .inactive komt vóór .background, dus er is nog tijd om de cookies te bewaren
                 if phase != .active { CookieVault.saveBeforeSuspend() }
@@ -18,15 +19,14 @@ struct ContentView: View {
 }
 
 // Inzoomen maakt de pagina voor Pinterest "smaller", waardoor het zelf minder en grotere kolommen
-// bouwt, zoals in de echte app. 1.0 = geen zoom. Pas deze twee getallen aan om te tweaken.
-let landscapeZoom: CGFloat = 1.25
+// bouwt, zoals in de echte app. 1.0 = geen zoom. De liggende zoom komt nu tijdelijk uit het proefpaneel.
 let portraitZoom: CGFloat = 1.0
 
 // WKWebView die bij het draaien van de iPad automatisch de juiste zoom kiest
 final class PinWebView: WKWebView {
     override func layoutSubviews() {
         super.layoutSubviews()
-        let zoom = bounds.width > bounds.height ? landscapeZoom : portraitZoom
+        let zoom = bounds.width > bounds.height ? ZoomLab.shared.landscapeZoom : portraitZoom
         if pageZoom != zoom { pageZoom = zoom }
     }
 }
@@ -57,6 +57,7 @@ struct PinterestView: UIViewRepresentable {
                           for: .valueChanged)
         webView.scrollView.refreshControl = refresh
         context.coordinator.webView = webView
+        ZoomLab.shared.webView = webView
 
         // Eerst de bewaarde login terugzetten, pas daarna de pagina laden
         Task {
@@ -80,6 +81,19 @@ struct PinterestView: UIViewRepresentable {
         // Na elke geladen pagina de cookies bewaren (dus ook direct na het inloggen)
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             Task { await CookieVault.save() }
+            // TIJDELIJK: meetwaarden verversen zodra Pinterest het raster heeft opgebouwd
+            Task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                ZoomLab.shared.measure()
+            }
+        }
+
+        // TIJDELIJK: tablet-site (mobiele weergave) of desktop-site, gekozen in het proefpaneel
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     preferences: WKWebpagePreferences) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
+            preferences.preferredContentMode = ZoomLab.shared.mobile ? .mobile : .recommended
+            return (.allow, preferences)
         }
 
         // Links die een nieuw venster willen openen, gewoon in dezelfde weergave laden
