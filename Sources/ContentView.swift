@@ -17,6 +17,20 @@ struct ContentView: View {
     }
 }
 
+// Inzoomen maakt de pagina voor Pinterest "smaller", waardoor het zelf minder en grotere kolommen
+// bouwt, zoals in de echte app. 1.0 = geen zoom. Pas deze twee getallen aan om te tweaken.
+let landscapeZoom: CGFloat = 1.25
+let portraitZoom: CGFloat = 1.0
+
+// WKWebView die bij het draaien van de iPad automatisch de juiste zoom kiest
+final class PinWebView: WKWebView {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let zoom = bounds.width > bounds.height ? landscapeZoom : portraitZoom
+        if pageZoom != zoom { pageZoom = zoom }
+    }
+}
+
 struct PinterestView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -31,7 +45,7 @@ struct PinterestView: UIViewRepresentable {
                                   forMainFrameOnly: true)
         config.userContentController.addUserScript(script)
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = PinWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true   // veeg terug zoals in een app
         webView.uiDelegate = context.coordinator
         webView.navigationDelegate = context.coordinator
