@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import UIKit
 import WebKit
 
 // Reservekopie van de Pinterest-cookies in de Keychain, zodat je ingelogd blijft
@@ -27,6 +28,26 @@ enum CookieVault {
         }
         guard !stored.isEmpty, let data = try? JSONEncoder().encode(stored) else { return }
         writeKeychain(data)
+    }
+
+    // Vraag iOS om wat extra tijd, zodat het bewaren afkomt als de app naar de achtergrond gaat
+    private static var backgroundTask = UIBackgroundTaskIdentifier.invalid
+
+    static func saveBeforeSuspend() {
+        guard backgroundTask == .invalid else { return }
+        backgroundTask = UIApplication.shared.beginBackgroundTask {
+            MainActor.assumeIsolated { endBackgroundTask() }
+        }
+        Task {
+            await save()
+            endBackgroundTask()
+        }
+    }
+
+    private static func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
     }
 
     static func restore() async {

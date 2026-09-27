@@ -12,20 +12,8 @@ struct ContentView: View {
             .ignoresSafeArea(edges: .bottom)
             .onChange(of: scenePhase) { _, phase in
                 // .inactive komt vóór .background, dus er is nog tijd om de cookies te bewaren
-                if phase != .active { saveCookiesInBackground() }
+                if phase != .active { CookieVault.saveBeforeSuspend() }
             }
-    }
-
-    // Vraag iOS om wat extra tijd, zodat het bewaren afkomt als de app naar de achtergrond gaat
-    private func saveCookiesInBackground() {
-        var taskID = UIBackgroundTaskIdentifier.invalid
-        taskID = UIApplication.shared.beginBackgroundTask {
-            UIApplication.shared.endBackgroundTask(taskID)
-        }
-        Task {
-            await CookieVault.save()
-            UIApplication.shared.endBackgroundTask(taskID)
-        }
     }
 }
 
