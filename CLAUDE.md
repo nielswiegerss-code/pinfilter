@@ -32,6 +32,10 @@ In de geparste data verwijdert het:
 
 Linksonder staat een teller (`SHOW_COUNTER`).
 
+**Uitbreiding in v1.11** (na een test op de iPad: advertenties onder "More to explore" op een geopende pin). Pinterests GraphQL-data gebruikt camelCase: `isPromoted`, `pinPromotionId` en `promoter` (een object bij advertenties, `null` bij gewone pins). `adFlags()` en `MARKERS` herkennen die nu ook.
+
+Getest op echte data van een openbare pinpagina, waarin niets werd weggehaald, en op nagebootste feeds.
+
 **Waarom deze aanpak.** CSS-verbergen laat gaten achter, omdat Pinterest de pins al met JavaScript absoluut heeft gepositioneerd. Safari-extensies draaien niet in webapps op het beginscherm. Door de data te filteren vóórdat het raster wordt gebouwd, ontstaan er geen gaten. **Verander de filterlogica niet** tenzij een test op de iPad een probleem laat zien.
 
 ## Randvoorwaarden en besluiten
@@ -202,7 +206,28 @@ Het script verbergt de inbox-knop in de onderbalk. Het herkent die aan een aria-
 
 **Openen.** `transitionsJS` houdt een klik op een rasterpin maximaal 250 ms vast en stuurt `pinTap` met de afbeeldingsrect in punten. Native maakt een snapshot en laat Pinterest doorgaan (`window.__pfGo`). Daarna vraagt native steeds de grootste afbeelding op de pinpagina op en animeert de kopie daarheen.
 
-**Sluiten.** Na omlaag swipen maakt native een snapshot en roept `goBack` aan. Daarna vliegt de afbeelding naar de rasterpin met hetzelfde pin-ID.
+**Sluiten.** Dit gebeurt via een eigen `UIPanGestureRecognizer` (`dismissPan` in de Coordinator). Het gebaar start alleen op `/pin/`-pagina's, helemaal bovenaan en bij een beweging omlaag. `scrollView.bounces` staat daar uit.
+
+- Tijdens het slepen volgt een snapshot van de pinpagina de vinger als krimpende kaart. Erachter staat de feed-snapshot die bij het openen is bewaard (`openedFrom[pinId]`).
+- Bij loslaten na meer dan 130 pt, of bij een snelle beweging, volgt `goBack`. De afbeelding vliegt naar de opgeslagen bronrect, en de overlay vervaagt pas als de echte feed stabiel is.
+- Anders veert de kaart terug.
+
+### Pin-opmaak (`PageTweaks.swift`)
+
+Dit werkt alleen bij `closeup-body-landscape`. De blokken verschuiven puur met transforms:
+
+- `closeup-container` gaat naar links (16 pt marge) en wordt tot 12% groter. `closeup-related-modules-container` krijgt `margin-top` zodat niets overlapt.
+- `header` (de knoppenbalk) gaat omhoog naar de bovenkant van de afbeelding. Wat eronder stond, schuift omhoog.
+- Save staat rechts in de balk (flex `order` plus `margin-left: auto`).
+- `back-button` is een donker rondje op de hoek van de afbeelding.
+
+Het script maakt de opmaak alleen opnieuw als het pad, de breedte of de hoogte van de afbeelding verandert.
+
+### Kolommen wisselen zonder herladen
+
+`window.__pfSetZoom(f)` in `columnsJS` past de viewport direct aan. Bij 5 kolommen zet het Pinterests eigen viewport-regel terug (`data-pf-original`).
+
+De webview-achtergrond is `.systemBackground` met `isOpaque = false`, zodat er niets wit flitst.
 
 Het lang-indrukken-menu is opgemaakt zoals in de app: opgetilde kopie van de pin, donkere achtergrond, SVG-icoontjes en een label bovenin.
 
