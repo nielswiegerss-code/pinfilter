@@ -163,9 +163,15 @@ Volg de officiële documentatie op docs.sidestore.io. Het verloop in het kort:
 
 **Waarschuwing.** Gebruik géén installers die SideStore "zonder computer" beloven via gedeelde of enterprise-certificaten of DNS-profielen. Die certificaten zijn van onbekende herkomst, en zo'n profiel geeft een derde partij veel invloed op het apparaat.
 
-### 6. Optioneel, later
+### 6. SideStore-bron (gedaan)
 
-Een SideStore-bron (AltStore-formaat JSON in de repo), zodat nieuwe versies als update in SideStore verschijnen.
+`scripts/make_source.py` maakt bij elke tag-build een `source.json` (AltStore-formaat). Die hangt als asset aan de Release. De vaste bron-URL voor SideStore is `https://github.com/nielswiegerss-code/pinfilter/releases/latest/download/source.json`.
+
+Het versienummer komt uit de git-tag (`v1.2` wordt 1.2) en het buildnummer uit `GITHUB_RUN_NUMBER`. Pas daarom `MARKETING_VERSION` in `project.yml` niet met de hand aan.
+
+### Kolommen / zoom
+
+Pinterest kiest het aantal kolommen zelf, op basis van de viewportbreedte. `PinWebView` in `ContentView.swift` zet `pageZoom` per stand (`landscapeZoom` en `portraitZoom`). Zo krijg je minder, grotere kolommen, zoals in de Pinterest-app. Niels heeft een gewone iPad (liggend ongeveer 1180 pt breed; zonder zoom 5 kolommen, het doel is 4).
 
 ---
 

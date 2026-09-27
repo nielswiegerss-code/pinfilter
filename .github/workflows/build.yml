@@ -12,11 +12,21 @@ jobs:
       - uses: actions/checkout@v4
       - run: brew install xcodegen
       - run: xcodegen generate
+      - name: Versie bepalen
+        # Bij een tag (v1.2) wordt dat de versie; het buildnummer loopt altijd op
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "APP_VERSION=0.0" >> "$GITHUB_ENV"
+          fi
+          echo "APP_BUILD=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
       - name: Build (unsigned)
         run: |
           xcodebuild -project PinFilter.xcodeproj -scheme PinFilter \
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath build \
+            MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
       - name: Package IPA
@@ -25,12 +35,19 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/PinFilter.app Payload/
           zip -qry PinFilter.ipa Payload
           unzip -l PinFilter.ipa | head -20
+          plutil -p Payload/PinFilter.app/Info.plist | grep -E 'CFBundle(ShortVersionString|Version|Identifier)"'
+      - name: SideStore-bron maken
+        run: python3 scripts/make_source.py "$APP_VERSION" "$APP_BUILD" PinFilter.ipa
       - uses: actions/upload-artifact@v4
         with:
           name: PinFilter-ipa
-          path: PinFilter.ipa
+          path: |
+            PinFilter.ipa
+            source.json
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: PinFilter.ipa
+          files: |
+            PinFilter.ipa
+            source.json
