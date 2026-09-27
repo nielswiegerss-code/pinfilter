@@ -1,0 +1,10 @@
+# Gegenereerd door XcodeGen / xcodebuild in CI
+*.xcodeproj/
+build/
+Payload/
+*.ipa
+DerivedData/
+.DS_Store
+
+# Oude kopie van het project
+pinfilter.zip
