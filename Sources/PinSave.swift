@@ -2,9 +2,9 @@ import UIKit
 import WebKit
 
 // Lang indrukken op een pin opent een rond menu, zoals in de Pinterest-app.
-// Sleep naar een optie en laat los (of tik erop). Het opslaan gebruikt Pinterests eigen
-// "Opslaan"-knop: eerst in het raster (via een nagebootste muis-hover), en als die daar niet
-// bestaat (tablet-site) op de pinpagina zelf, waarna we automatisch teruggaan.
+// Sleep naar een optie en laat los (of tik erop).
+// - Save: opent de pin en drukt op Pinterests eigen Save-knop (bordkeuze); daarna automatisch terug.
+// - Hide: kiest "Hide Pin" in het "…"-menu van de pin, zodat Pinterest er minder van laat zien.
 
 // Brug van JavaScript naar de app: trillen, en scrollen uit/aan zolang het menu open is
 final class NativeBridge: NSObject, WKScriptMessageHandler {
@@ -57,76 +57,60 @@ let pinSaveJS = #"""
     t._timer = setTimeout(() => t.remove(), ms);
   };
 
+  const hideToast = () => { const t = document.getElementById('pf-toast'); if (t) t.remove(); };
+
   const native = (msg) => { try { webkit.messageHandlers.pfNative.postMessage(msg); } catch (e) {} };
   const haptic = () => native({ type: 'haptic' });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // --- Pinterests eigen knoppen vinden ---
 
-  // Laat React denken dat de muis boven de pin hangt, zodat de hover-knoppen verschijnen (desktop-site)
-  const hover = (item) => {
-    const target = item.querySelector('a[href*="/pin/"]') || item;
-    const r = target.getBoundingClientRect();
-    const opts = { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, view: window };
-    for (const el of [item, target]) {
-      el.dispatchEvent(new PointerEvent('pointerover', { ...opts, pointerType: 'mouse' }));
-      el.dispatchEvent(new PointerEvent('pointerenter', { ...opts, pointerType: 'mouse', bubbles: false }));
-      el.dispatchEvent(new MouseEvent('mouseover', opts));
-      el.dispatchEvent(new MouseEvent('mouseenter', { ...opts, bubbles: false }));
-      el.dispatchEvent(new MouseEvent('mousemove', opts));
-    }
-  };
-  const unhover = (item) => {
-    const opts = { bubbles: true, view: window };
-    item.dispatchEvent(new MouseEvent('mouseout', opts));
-    item.dispatchEvent(new MouseEvent('mouseleave', { ...opts, bubbles: false }));
-    item.dispatchEvent(new PointerEvent('pointerout', { ...opts, pointerType: 'mouse' }));
-  };
-
   const label = (el) => ((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).trim().toLowerCase();
   const isSave = (el) => /^(opslaan|save|bewaren)$/.test(label(el));
-  const isBoard = (el) => /bord|board/.test(label(el) + ' ' + (el.getAttribute('data-test-id') || '').toLowerCase()) && !isSave(el);
+  const isHide = (el) => /^(hide pin|hide|pin verbergen|verbergen|verberg pin)$/.test(label(el));
   const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-  const buttonsIn = (root) => [...root.querySelectorAll('button, [role="button"]')];
+  const clickables = (root) => [...root.querySelectorAll('button, [role="button"], [role="menuitem"], [role="option"], a, div[tabindex]')];
+  const outsideGrid = (el) => !el.closest('[data-grid-item]') && visible(el);
 
-  const SAVE_SELECTORS =
-    '[data-test-id="PinBetterSaveButton"], [data-test-id="pin-save-button"], [data-test-id="save-button"],' +
-    '[data-test-id="closeup-save-button"] button, [data-test-id="closeup-save-button"], [aria-label="Opslaan"], [aria-label="Save"]';
-  const BOARD_SELECTORS =
-    '[data-test-id="board-dropdown-select-button"], [data-test-id="boardSelectionDropdown"],' +
-    '[data-test-id="board-dropdown"], [data-test-id="PinBetterSaveDropdown"], [data-test-id="closeup-board-dropdown"]';
+  // In volgorde van voorkeur; een omhulsel (bijv. een div met data-test-id) wordt vervangen door de knop erin
+  const SAVE_SELECTORS = ['[data-test-id="closeup-save-button"]', '[data-test-id="PinBetterSaveButton"]',
+    '[data-test-id="pin-save-button"]', '[data-test-id="save-button"]', '[aria-label="Save"]', '[aria-label="Opslaan"]'];
+  const MENU_BUTTON_SELECTORS = ['[data-test-id="contextual-menu-button"]', '[aria-label="pin options" i]',
+    '[aria-label="more options" i]', '[aria-label="meer opties" i]'];
 
-  // Zoek binnen een pin in het raster
-  const findIn = (item, selectors, test) =>
-    item.querySelector(selectors) || buttonsIn(item).find(test);
+  const asButton = (el) => el.matches('button, [role="button"]') ? el : (el.querySelector('button, [role="button"]') || el);
 
-  // Zoek op de pinpagina, maar niet in het raster met gerelateerde pins eronder
-  const findOnCloseup = (selectors, test) => {
-    const outsideGrid = (el) => !el.closest('[data-grid-item]') && visible(el);
-    return [...document.querySelectorAll(selectors)].find(outsideGrid) ||
-      buttonsIn(document).find((b) => outsideGrid(b) && test(b));
+  // Eerste element dat past, per selector in volgorde van voorkeur
+  const pick = (root, selectors, ok = () => true) => {
+    for (const sel of selectors) {
+      for (const el of root.querySelectorAll(sel)) { const b = asButton(el); if (ok(b)) return b; }
+    }
+    return null;
   };
 
-  // Wacht tot een knop verschijnt (Pinterest tekent knoppen vaak pas even later)
-  const waitFor = async (fn, ms) => {
-    for (let t = 0; t < ms; t += 100) { const el = fn(); if (el) return el; await sleep(100); }
+  // Zoek op de pagina, maar niet in het raster met pins
+  const findOutsideGrid = (selectors, test) =>
+    pick(document, selectors, outsideGrid) || clickables(document).find((b) => outsideGrid(b) && test(b));
+
+  const waitFor = async (fn, ms, step = 50) => {
+    for (let t = 0; t < ms; t += step) { const el = fn(); if (el) return el; await sleep(step); }
     return null;
   };
 
   // Als iets niet lukt: laat zien welke knoppen er wél zijn, zodat het te repareren is
   const diagnose = (root, what) => {
-    const found = [...root.querySelectorAll('button, [role="button"], [data-test-id]')]
-      .filter((b) => !b.closest('[data-grid-item]') || root !== document)
-      .map((b) => b.getAttribute('data-test-id') || b.getAttribute('aria-label') || (b.textContent || '').trim().slice(0, 20))
+    const found = clickables(root)
+      .filter((b) => root !== document || outsideGrid(b))
+      .map((b) => b.getAttribute('data-test-id') || b.getAttribute('aria-label') || (b.textContent || '').trim().slice(0, 24))
       .filter(Boolean);
     toast(what + ' niet gevonden. Maak een screenshot voor Claude:\n' + [...new Set(found)].slice(0, 30).join(' · '), 15000);
   };
 
   const pressButton = (el) => {
     const opts = { bubbles: true, cancelable: true, view: window };
-    el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerType: 'mouse' }));
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerType: 'touch' }));
     el.dispatchEvent(new MouseEvent('mousedown', opts));
-    el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerType: 'mouse' }));
+    el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerType: 'touch' }));
     el.dispatchEvent(new MouseEvent('mouseup', opts));
     el.click();
   };
@@ -139,52 +123,47 @@ let pinSaveJS = #"""
     return true;
   };
 
-  const actions = {
-    async save(item) {
-      // 1. Desktop-site: Opslaan-knop in het raster
-      hover(item);
-      const btn = await waitFor(() => findIn(item, SAVE_SELECTORS, isSave), 700);
-      if (btn) { pressButton(btn); setTimeout(() => unhover(item), 1500); return; }
-      unhover(item);
+  const dialogOpen = () => [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')].some(visible);
 
-      // 2. Tablet-site: pin openen, daar opslaan, en terug
+  const actions = {
+    // Save: pin openen, op Pinterests Save-knop drukken (die opent de bordkeuze),
+    // en na het kiezen van een bord automatisch terug naar de feed
+    async save(item) {
       const startURL = location.href;
       if (!openPin(item)) { diagnose(item, 'Link naar pin'); return; }
-      toast('Opslaan…', 4000);
-      const closeupBtn = await waitFor(() => location.href !== startURL && findOnCloseup(SAVE_SELECTORS, isSave), 5000);
-      if (!closeupBtn) { diagnose(document, 'Opslaan-knop op de pinpagina'); return; }
-      pressButton(closeupBtn);
-      await sleep(1200);
-      // Opent Pinterest een bordkeuze (bijv. de eerste keer)? Dan blijven we hier staan.
-      if (document.querySelector('[role="dialog"]')) return;
-      toast('Opgeslagen', 1500);
-      history.back();
+      toast('Save…', 6000);
+      const btn = await waitFor(() => location.href !== startURL && findOutsideGrid(SAVE_SELECTORS, isSave), 6000);
+      hideToast();
+      if (!btn) { diagnose(document, 'Save-knop op de pinpagina'); return; }
+      const pinURL = location.href;
+      pressButton(btn);
+      // Wacht tot de bordkeuze verschijnt, en daarna tot die weer dicht is
+      if (await waitFor(dialogOpen, 1500)) {
+        await waitFor(() => !dialogOpen(), 180000, 200);
+        await sleep(400);
+      } else {
+        await sleep(800);   // direct opgeslagen, zonder bordkeuze
+      }
+      if (location.href === pinURL) history.back();
     },
 
-    async board(item) {
-      // 1. Desktop-site: bordkeuze in het raster
-      hover(item);
-      const dd = await waitFor(() => findIn(item, BOARD_SELECTORS, isBoard), 700);
-      if (dd) { pressButton(dd); return; }
-      unhover(item);
-
-      // 2. Tablet-site: pin openen en daar de bordkeuze openen
-      const startURL = location.href;
-      if (!openPin(item)) { diagnose(item, 'Link naar pin'); return; }
-      const closeupDD = await waitFor(() => location.href !== startURL && findOnCloseup(BOARD_SELECTORS, isBoard), 5000);
-      if (closeupDD) { pressButton(closeupDD); return; }
-      // Geen losse bordkeuze: dan maar de Opslaan-knop, die opent op de tablet-site vaak de bordkeuze
-      const closeupBtn = findOnCloseup(SAVE_SELECTORS, isSave);
-      if (closeupBtn) { pressButton(closeupBtn); return; }
-      diagnose(document, 'Bordkeuze op de pinpagina');
+    // Hide: het "…"-menu van de pin openen en daar "Hide Pin" kiezen
+    async hide(item) {
+      const menuBtn = pick(item, MENU_BUTTON_SELECTORS);
+      if (!menuBtn) { diagnose(item, '"…"-knop'); return; }
+      pressButton(menuBtn);
+      const option = await waitFor(() => clickables(document).find((b) => outsideGrid(b) && isHide(b)) ||
+                                         clickables(item).find((b) => visible(b) && isHide(b)), 2000);
+      if (!option) { diagnose(document, 'Hide-optie'); return; }
+      pressButton(option);
     }
   };
 
   // --- Het ronde menu ---
 
   const OPTIONS = [
-    { key: 'save', icon: '📌', text: 'Opslaan' },
-    { key: 'board', icon: '🗂️', text: 'Bord kiezen' }
+    { key: 'save', icon: '📌', text: 'Save' },
+    { key: 'hide', icon: '🚫', text: 'Hide' }
   ];
   let menu = null;   // { el, item, opts: [{key, x, y, el, labelEl}], hot }
 
@@ -236,7 +215,9 @@ let pinSaveJS = #"""
 
   const run = (key, item) => {
     closeMenu();
-    actions[key](item).catch((e) => toast('Fout: ' + e));
+    // Pas starten nadat het loslaten helemaal is afgehandeld, anders blokkeert
+    // de klikblokkering hieronder ook de klik die de actie zelf doet
+    setTimeout(() => actions[key](item).catch((e) => toast('Fout: ' + e)), 0);
   };
 
   // --- Aanraken ---

@@ -26,7 +26,7 @@ let portraitZoom: CGFloat = 1.0
 final class PinWebView: WKWebView {
     override func layoutSubviews() {
         super.layoutSubviews()
-        let zoom = bounds.width > bounds.height ? ZoomLab.shared.landscapeZoom : portraitZoom
+        let zoom = bounds.width > bounds.height ? ZoomLab.shared.effectivePageZoom : portraitZoom
         if pageZoom != zoom { pageZoom = zoom }
     }
 }
@@ -54,6 +54,10 @@ struct PinterestView: UIViewRepresentable {
 
         // TIJDELIJK: meet welke breedte Pinterest uitleest, en laat outerWidth meezoomen
         config.userContentController.addUserScript(WKUserScript(source: widthProbeJS,
+                                                                injectionTime: .atDocumentStart,
+                                                                forMainFrameOnly: true))
+        // TIJDELIJK: tweede zoommethode via de viewport-instelling van de pagina
+        config.userContentController.addUserScript(WKUserScript(source: viewportZoomJS,
                                                                 injectionTime: .atDocumentStart,
                                                                 forMainFrameOnly: true))
 
