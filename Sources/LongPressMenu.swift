@@ -163,7 +163,6 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
         prefetch = Prefetch(rect: rect, finger: finger, offset: webView.scrollView.contentOffset,
                             time: CACurrentMediaTime(), href: href)
         notPinAt = 0
-        PinHaptics.prepare()
         // Bericht kwam later dan de preview? Dan nu alsnog beginnen (als de vinger nog ligt)
         if waitingForPrefetch && !opening && overlay == nil && fingerDown {
             waitingForPrefetch = false
