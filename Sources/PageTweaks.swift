@@ -59,7 +59,9 @@ let pageTweaksJS = #"""
     const key = location.pathname + '|' + innerWidth + '|' + innerHeight;
     if (key !== scanKey) { scanKey = key; scanTries = 0; }
     const now = performance.now();
-    if (scanTries >= 12 || now - lastScan < 700) return;
+    // Eerst snel (12 keer, 700 ms ertussen); daarna niet stoppen maar rustiger (elke 4 s), want de
+    // onderbalk kan bij een trage verbinding pas veel later verschijnen.
+    if (now - lastScan < (scanTries >= 12 ? 4000 : 700)) return;
     scanTries++;
     lastScan = now;
     for (const el of document.querySelectorAll('a, button, [role="button"], [role="tab"], [role="link"]')) {
@@ -106,6 +108,7 @@ let pageTweaksJS = #"""
     classed.length = 0;
   };
 
+  let queued = false, fastQueued = false;   // staat er al een run() ingepland? (zie schedule)
   let lastKey = '', keyPath = '';   // sleutel van de laatste opmaak-ronde (zie run)
   let runToken = 0;       // een nieuwe opmaak-ronde annuleert de vorige
   let lastStatus = '';    // 'ok' | 'safe' | 'plain' | 'geen'
