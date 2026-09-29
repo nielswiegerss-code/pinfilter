@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import Network
 
 // Pinterest zonder advertenties.
 // Werkende versie uit Swift Playgrounds (getest op iPad).
@@ -34,35 +35,30 @@ struct PinterestView: UIViewRepresentable {
         config.defaultWebpagePreferences.preferredContentMode = .mobile
 
         // Het filter draait vóór alle code van Pinterest zelf
-        let script = WKUserScript(source: adFilterJS,
-                                  injectionTime: .atDocumentStart,
-                                  forMainFrameOnly: true)
-        config.userContentController.addUserScript(script)
+        // Alle scripts staan achter een hostcontrole (ShellHost.guarded): ze doen alleen iets op Pinterest,
+        // niet op andere sites of lege pagina's. De scripts zelf zijn daarvoor niet aangepast.
+        config.userContentController.addUserScript(ShellHost.userScript(adFilterJS, at: .atDocumentStart))
         // Voor de pagina-analyse: welke advertentievelden kwamen er door het filter heen (zie Columns.swift)
-        config.userContentController.addUserScript(WKUserScript(source: adProbeJS,
-                                                                injectionTime: .atDocumentStart,
-                                                                forMainFrameOnly: true))
+        config.userContentController.addUserScript(ShellHost.userScript(adProbeJS, at: .atDocumentStart))
 
         // Lang indrukken op een pin = rond menu om op te slaan (los van het advertentiefilter)
-        config.userContentController.addUserScript(WKUserScript(source: pinSaveJS,
-                                                                injectionTime: .atDocumentEnd,
-                                                                forMainFrameOnly: true))
+        config.userContentController.addUserScript(ShellHost.userScript(pinSaveJS, at: .atDocumentEnd))
+        // De brug naar de app luistert alleen naar de hoofdpagina van Pinterest (zie ShellBridgeGate)
         let bridge = NativeBridge()
-        config.userContentController.add(bridge, name: "pfNative")
+        let gate = ShellBridgeGate(inner: bridge)
+        config.userContentController.add(gate, name: "pfNative")
+        // Meldt dat de eerste pin getekend is, zodat het startscherm weg kan
+        config.userContentController.addUserScript(ShellHost.userScript(shellReadyJS, at: .atDocumentEnd))
 
         // Kleine layoutaanpassingen, zoals de inbox-knop verbergen (zie PageTweaks.swift)
-        config.userContentController.addUserScript(WKUserScript(source: pageTweaksJS,
-                                                                injectionTime: .atDocumentEnd,
-                                                                forMainFrameOnly: true))
+        config.userContentController.addUserScript(ShellHost.userScript(pageTweaksJS, at: .atDocumentEnd))
         // Open-animatie: tik op een pin even vasthouden en de app laten animeren (zie Transitions.swift).
         // Na pinSaveJS, zodat het lang-indrukken-menu een klik eerst kan tegenhouden.
-        config.userContentController.addUserScript(WKUserScript(source: transitionsJS,
-                                                                injectionTime: .atDocumentEnd,
-                                                                forMainFrameOnly: true))
+        config.userContentController.addUserScript(ShellHost.userScript(transitionsJS, at: .atDocumentEnd))
         // 4 of 5 kolommen in liggende stand (zie Columns.swift)
-        config.userContentController.addUserScript(ColumnSetting.shared.script)
+        config.userContentController.addUserScript(ShellHost.userScript(guarding: ColumnSetting.shared.script))
 
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = ShellWebView(frame: .zero, configuration: config)
         webView.allowsBackForwardNavigationGestures = true   // veeg terug zoals in een app
         webView.allowsLinkPreview = false   // lang indrukken is voor ons eigen menu, niet voor iOS-linkvoorbeeld
         webView.uiDelegate = context.coordinator
@@ -80,6 +76,7 @@ struct PinterestView: UIViewRepresentable {
                           for: .valueChanged)
         webView.scrollView.refreshControl = refresh
         context.coordinator.attach(webView, refresh: refresh)
+        gate.onReady = { [weak coordinator = context.coordinator] in coordinator?.markReady() }
         bridge.webView = webView
         bridge.transitions = context.coordinator.transitions
         ColumnSetting.shared.webView = webView
@@ -87,7 +84,7 @@ struct PinterestView: UIViewRepresentable {
         // Eerst de bewaarde login terugzetten, pas daarna de pagina laden
         Task {
             await CookieVault.restore()
-            webView.load(URLRequest(url: URL(string: "https://nl.pinterest.com/")!))
+            webView.load(URLRequest(url: ShellHost.home))
         }
         return webView
     }
@@ -101,7 +98,27 @@ struct PinterestView: UIViewRepresentable {
         let longPressMenu = LongPressMenu()
         private var refresh: UIRefreshControl?
         private var urlObservation: NSKeyValueObservation?
+        private var progressObservation: NSKeyValueObservation?
+        private var loadingObservation: NSKeyValueObservation?
         private let dismissPan = UIPanGestureRecognizer()
+
+        // MARK: Laadstatus
+        // Eén plek die bepaalt wat er over de webview ligt (zie ShellLoadView.swift):
+        // .launching = startscherm met spinner, .ready = de pagina zelf, .failed = "geen verbinding".
+        private enum Phase { case launching, ready, failed }
+        private var phase = Phase.launching
+        private let loadView = ShellLoadView()
+        private var hasCommitted = false          // is er in deze ronde al een pagina binnengekomen?
+        private var failedOffline = false         // de laatste fout was een verbindingsprobleem
+        private var readyTask: Task<Void, Never>?
+        private var recoveryTask: Task<Void, Never>?
+        private var refreshTask: Task<Void, Never>?
+        private var crashDates: [Date] = []
+        private var backgroundedAt: Date?
+        private var scrollLocks = Set<String>()
+        private let pathMonitor = NWPathMonitor()
+
+        deinit { pathMonitor.cancel() }
 
         func attach(_ webView: WKWebView, refresh: UIRefreshControl) {
             self.webView = webView
@@ -116,9 +133,43 @@ struct PinterestView: UIViewRepresentable {
             dismissPan.addTarget(self, action: #selector(handleDismissPan(_:)))
             dismissPan.delegate = self
             webView.addGestureRecognizer(dismissPan)
+
+            // Startscherm, voortgangsbalk en foutmelding liggen als één laag over de webview
+            loadView.frame = webView.bounds
+            loadView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            loadView.onRetry = { [weak self] in self?.retry() }
+            webView.addSubview(loadView)
+            progressObservation = webView.observe(\.estimatedProgress) { [weak self] _, _ in
+                Task { @MainActor in self?.syncProgress() }
+            }
+            loadingObservation = webView.observe(\.isLoading) { [weak self] _, _ in
+                Task { @MainActor in self?.syncProgress() }
+            }
+            beginLaunch()
+
+            // Formaat veranderd (draaien, Split View, venster slepen): losse lagen kloppen dan niet meer
+            (webView as? ShellWebView)?.onSizeChange = { [weak self] _ in self?.resetInteractionState() }
+
+            let center = NotificationCenter.default
+            center.addObserver(self, selector: #selector(appDidEnterBackground),
+                               name: UIApplication.didEnterBackgroundNotification, object: nil)
+            center.addObserver(self, selector: #selector(appWillEnterForeground),
+                               name: UIApplication.willEnterForegroundNotification, object: nil)
+            center.addObserver(self, selector: #selector(didReceiveMemoryWarning),
+                               name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+            // Komt de verbinding terug terwijl het "geen verbinding"-scherm staat, dan vanzelf opnieuw proberen
+            pathMonitor.pathUpdateHandler = { [weak self] path in
+                guard path.status == .satisfied else { return }
+                Task { @MainActor in self?.networkCameBack() }
+            }
+            pathMonitor.start(queue: DispatchQueue(label: "nl.niels.pinfilter.path", qos: .utility))
         }
 
-        private var isPinPage: Bool { webView?.url?.path.contains("/pin/") == true }
+        // Alleen een pinpagina van Pinterest zelf; een pad met "/pin/" op een andere site telt niet mee
+        private var isPinPage: Bool {
+            guard let url = webView?.url, ShellHost.isPinterest(url.host) else { return false }
+            return url.path.contains("/pin/")
+        }
 
         // Op een geopende pin is omlaag trekken "sluiten", dus daar geen verversen
         private func updateForPage() {
@@ -141,21 +192,48 @@ struct PinterestView: UIViewRepresentable {
             }
         }
 
+        // MARK: Scrollen vergrendelen
+        // Scrollen uit/aan gaat via benoemde redenen, zodat het ene gebaar het andere niet per ongeluk
+        // weer aanzet. (Het lang-indrukken-menu schrijft zelf nog rechtstreeks; zie resetInteractionState.)
+
+        private func lockScroll(_ reason: String) {
+            scrollLocks.insert(reason)
+            webView?.scrollView.isScrollEnabled = false
+        }
+
+        private func unlockScroll(_ reason: String) {
+            scrollLocks.remove(reason)
+            if scrollLocks.isEmpty { webView?.scrollView.isScrollEnabled = true }
+        }
+
+        // Alles wat tijdelijk over de pagina ligt of scrollen blokkeert direct opruimen: na een gecrasht
+        // webproces, bij een formaatwissel of als het geheugen krap is.
+        func resetInteractionState() {
+            // MERGE: transitions.reset(); longPressMenu.reset()
+            scrollLocks.removeAll()
+            // Een lopend sleepgebaar afbreken (uit en weer aan zetten geeft .cancelled)
+            if dismissPan.isEnabled {
+                dismissPan.isEnabled = false
+                dismissPan.isEnabled = true
+            }
+            webView?.scrollView.isScrollEnabled = true
+        }
+
         // Geopende pin wegswipen: bovenaan de pin naar beneden slepen
         @objc private func handleDismissPan(_ pan: UIPanGestureRecognizer) {
             guard let webView else { return }
             let t = pan.translation(in: webView)
             switch pan.state {
             case .began:
-                webView.scrollView.isScrollEnabled = false   // de pagina eronder niet laten meescrollen
+                lockScroll("dismiss")   // de pagina eronder niet laten meescrollen
                 transitions.beginDrag()
             case .changed:
                 transitions.updateDrag(translation: t)
             case .ended:
-                webView.scrollView.isScrollEnabled = true
+                unlockScroll("dismiss")
                 transitions.endDrag(translation: t, velocity: pan.velocity(in: webView))
             case .cancelled, .failed:
-                webView.scrollView.isScrollEnabled = true
+                unlockScroll("dismiss")
                 transitions.endDrag(translation: .zero, velocity: .zero)
             default:
                 break
@@ -177,23 +255,231 @@ struct PinterestView: UIViewRepresentable {
             true
         }
 
+        // MARK: Startscherm, voortgang en fouten
+
+        private func beginLaunch() {
+            phase = .launching
+            hasCommitted = false
+            failedOffline = false
+            loadView.hideFailure()
+            loadView.showPlaceholder()
+            readyTask?.cancel()
+            // Vangnet: nooit blijvend afgedekt. Duurt het laden nog (en is er niets binnen), dan wachten we door.
+            readyTask = Task { [weak self] in
+                while true {
+                    try? await Task.sleep(nanoseconds: 12_000_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    if self.webView?.isLoading == true && !self.hasCommitted { continue }
+                    self.markReady()
+                    return
+                }
+            }
+        }
+
+        // De eerste pin is getekend (melding van shellReadyJS), of een vangnet ging af
+        func markReady() {
+            guard phase == .launching else { return }
+            phase = .ready
+            readyTask?.cancel()
+            readyTask = nil
+            loadView.hidePlaceholder()
+        }
+
+        private func syncProgress() {
+            guard let webView else { return }
+            loadView.updateProgress(webView.estimatedProgress, loading: webView.isLoading)
+        }
+
+        private func showFailed(_ error: NSError) {
+            phase = .failed
+            readyTask?.cancel()
+            readyTask = nil
+            let url = error.domain == NSURLErrorDomain
+            let offline = url && [NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost,
+                                  NSURLErrorDataNotAllowed, NSURLErrorInternationalRoamingOff].contains(error.code)
+            let slow = url && error.code == NSURLErrorTimedOut
+            // Bij een verbindingsprobleem probeert de app het vanzelf opnieuw zodra er internet is
+            failedOffline = offline || slow ||
+                (url && [NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed].contains(error.code))
+            if offline {
+                loadView.showFailure(title: "Geen verbinding",
+                                     message: "Controleer of je iPad online is. Pins probeert het vanzelf opnieuw zodra er internet is.")
+            } else if slow {
+                loadView.showFailure(title: "Duurt te lang",
+                                     message: "Pinterest reageert niet. Probeer het zo nog eens.")
+            } else {
+                loadView.showFailure(title: "Pinterest laadt niet",
+                                     message: "De pagina kon niet worden geladen. Probeer het zo nog eens.")
+            }
+        }
+
+        // Een mislukte lading. Geannuleerde ladingen (bijvoorbeeld door het wegswipen van een pin of een
+        // omgeleide link) zijn geen fout.
+        private func handleFailure(_ error: Error) {
+            let ns = error as NSError
+            if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
+            if ns.domain == "WebKitErrorDomain" && ns.code == 102 { return }   // "frame load interrupted": beleid koos anders
+            endRefreshing()
+            if phase == .ready {
+                // Er staat al een pagina: die laten staan, alleen even melden
+                loadView.toast("Geen verbinding")
+            } else {
+                showFailed(ns)
+            }
+        }
+
+        // "Probeer opnieuw" (of de verbinding is terug). Na een mislukte start staat er nog geen pagina,
+        // en dan doet reload() niets: opnieuw de startpagina laden.
+        func retry() {
+            guard let webView else { return }
+            let fresh = phase == .failed || webView.url == nil || webView.url?.scheme == "about"
+            crashDates.removeAll()
+            recoveryTask?.cancel()
+            beginLaunch()
+            if fresh {
+                webView.load(URLRequest(url: ShellHost.home))
+            } else {
+                webView.reload()
+            }
+        }
+
+        private func networkCameBack() {
+            if phase == .failed && failedOffline { retry() }
+        }
+
+        // MARK: Verversen
+
         @objc func reload(_ sender: UIRefreshControl) {
-            webView?.reload()
-            sender.endRefreshing()
+            guard let webView else { sender.endRefreshing(); return }
+            // Zonder geladen pagina (bijvoorbeeld na een mislukte start) doet reload() niets: dan de startpagina laden
+            if phase == .failed || webView.url == nil || webView.url?.scheme == "about" {
+                retry()
+            } else {
+                webView.reload()
+            }
+            // De spinner blijft draaien tot de pagina binnen is (didFinish), met een vangnet van 8 s
+            refreshTask?.cancel()
+            refreshTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                guard !Task.isCancelled else { return }
+                self?.endRefreshing()
+            }
+        }
+
+        private func endRefreshing() {
+            refreshTask?.cancel()
+            refreshTask = nil
+            refresh?.endRefreshing()
+        }
+
+        // MARK: Achtergrond, geheugen
+
+        @objc private func appDidEnterBackground() {
+            backgroundedAt = Date()
+        }
+
+        // Komt de app terug na lange tijd, dan is de feed oud: ververs die (alleen op de startpagina)
+        @objc private func appWillEnterForeground() {
+            let since = backgroundedAt
+            backgroundedAt = nil
+            guard let webView else { return }
+            if phase == .failed { retry(); return }
+            guard let since, phase == .ready, !webView.isLoading,
+                  Date().timeIntervalSince(since) > 30 * 60,
+                  webView.url?.path == "/" || webView.url?.path == "" else { return }
+            beginLaunch()
+            webView.reload()
+        }
+
+        // Weinig geheugen: in de achtergrond tijdelijke lagen (momentopnames) direct opruimen
+        @objc private func didReceiveMemoryWarning() {
+            if UIApplication.shared.applicationState != .active { resetInteractionState() }
+        }
+
+        // MARK: WKNavigationDelegate
+
+        // Welke links blijven in de app en welke gaan naar een los venster of naar iOS (zie ShellNavigation)
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
+            guard let url = navigationAction.request.url else { return .cancel }
+            let route = ShellNavigation.route(url,
+                                              type: navigationAction.navigationType,
+                                              isMainFrame: navigationAction.targetFrame?.isMainFrame ?? true,
+                                              isNewWindow: navigationAction.targetFrame == nil)
+            if case .allow = route { return .allow }
+            ShellNavigation.perform(route, from: webView)
+            return .cancel
+        }
+
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            hasCommitted = true
+            // Was het "geen verbinding"-scherm nog zichtbaar, maar komt er nu toch een pagina: terug naar laden
+            if phase == .failed {
+                loadView.hideFailure()
+                loadView.showPlaceholder()
+                phase = .launching
+            }
         }
 
         // Na elke geladen pagina de cookies bewaren (dus ook direct na het inloggen)
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            endRefreshing()
             Task { await CookieVault.save() }
             updateForPage()
+            // Pagina zonder getekende pin (bijvoorbeeld inloggen): na enkele seconden toch tonen
+            if phase == .launching {
+                readyTask?.cancel()
+                readyTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    self?.markReady()
+                }
+            }
         }
 
-        // Links die een nieuw venster willen openen, gewoon in dezelfde weergave laden
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            handleFailure(error)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            handleFailure(error)
+        }
+
+        // iOS stopt het webproces als het geheugen op is (Pinterest is zwaar). Zonder herstel blijft het scherm leeg.
+        // Eén keer: gewoon herladen. Vaker binnen een minuut: steeds langer wachten, en na vier keer stoppen met
+        // "Probeer opnieuw" (geen eindeloze lus).
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            resetInteractionState()
+            endRefreshing()
+            let now = Date()
+            crashDates = crashDates.filter { now.timeIntervalSince($0) < 60 } + [now]
+            let count = crashDates.count
+            beginLaunch()
+            if count > 4 {
+                showFailed(NSError(domain: WKErrorDomain, code: WKError.webContentProcessTerminated.rawValue))
+                return
+            }
+            let delay = count == 1 ? 0 : min(pow(2.0, Double(count - 2)), 8)
+            recoveryTask?.cancel()
+            recoveryTask = Task { [weak self] in
+                if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+                guard !Task.isCancelled, let self, let webView = self.webView, self.phase == .launching else { return }
+                if count == 1, webView.url != nil { webView.reload() } else { webView.load(URLRequest(url: ShellHost.home)) }
+            }
+        }
+
+        // MARK: WKUIDelegate
+
+        // Links die een nieuw venster willen openen: Pinterest blijft in dezelfde weergave,
+        // andere sites gaan naar een los venster (nooit een lege of about:blank-pagina laden)
         func webView(_ webView: WKWebView,
                      createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction,
                      windowFeatures: WKWindowFeatures) -> WKWebView? {
-            if navigationAction.targetFrame == nil {
+            guard navigationAction.targetFrame == nil, let url = navigationAction.request.url else { return nil }
+            let route = ShellNavigation.route(url, type: navigationAction.navigationType,
+                                              isMainFrame: true, isNewWindow: true)
+            if ShellNavigation.perform(route, from: webView) { return nil }
+            if let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
                 webView.load(navigationAction.request)
             }
             return nil
