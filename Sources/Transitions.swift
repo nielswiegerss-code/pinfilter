@@ -11,6 +11,10 @@ import WebKit
 // Sluiten: bovenaan een pin omlaag slepen. De pinpagina volgt je vinger als een kaart die krimpt;
 // daarachter zie je de feed (de momentopname van het openen). Ver genoeg losgelaten: de afbeelding
 // vliegt naar haar plek in de feed, en de echte feed wordt onzichtbaar opgebouwd en daarna getoond.
+//
+// Waar de grote afbeelding op de pinpagina komt te staan, meldt de pagina zelf ("closeupReady", zie
+// LayoutBridge onderaan en PageTweaks.swift): pas als de viewport gewisseld is, de opmaak is toegepast en
+// gecontroleerd. Die melding vervangt het steeds opnieuw vragen (pollen); pollen blijft alleen als vangnet.
 @MainActor
 final class PinTransitions {
     weak var webView: WKWebView?
@@ -23,10 +27,34 @@ final class PinTransitions {
     private var openedFrom: [String: (screen: UIView, rect: CGRect)] = [:]
     private var openOrder: [String] = []
 
+    // Laatste melding van de pagina dat de pinpagina klaar is ("closeupReady")
+    private var ready: (path: String, rect: CGRect, status: String, at: Date)?
+    // Pin waarvoor al iemand op de melding of op een plek wacht (voorkomt dubbele wachtlussen)
+    private var pendingPinId: String?
+    // Wordt hoger bij reset(), zodat lopende animaties en wachttaken niets meer aanraken
+    private var generation = 0
+
+    // Hoe onze pin-opmaak de laatste keer uitpakte; daarmee voorspellen we de plek voor de volgende pin
+    private struct KnownLayout: Codable {
+        var natW: CGFloat, natH: CGFloat   // natuurlijke maat van het pinblok (vóór onze vergroting)
+        var maxNatH: CGFloat               // grootste natuurlijke hoogte tot nu toe (Pinterest kapt lange pins af)
+        var left: CGFloat, top: CGFloat    // waar de afbeelding komt
+        var viewWidth: CGFloat             // breedte van de webview toen (andere breedte: niet gebruiken)
+    }
+    private var knownLayout: KnownLayout? = {
+        guard let data = UserDefaults.standard.data(forKey: "pfKnownLayout") else { return nil }
+        return try? JSONDecoder().decode(KnownLayout.self, from: data)
+    }()
+    private var lastStatus = "ok"
+
     // MARK: Openen
 
     func pinTapped(rect: CGRect, pinId: String) {
         guard let webView, overlay == nil, rect.width > 20, rect.height > 20 else { go(); return }
+        ready = nil   // een oude melding (van een eerder bezoek aan deze pin) telt niet
+        let tapped = Date()
+        let gen = generation
+        pendingPinId = pinId.isEmpty ? nil : pinId
 
         let container = UIView(frame: webView.bounds)
         let screen = webView.snapshotView(afterScreenUpdates: false)
@@ -68,17 +96,39 @@ final class PinTransitions {
         }
 
         Task {
-            let target = await waitForRect(Self.closeupImageJS, timeout: 1.8, minWait: max(switchDelay, predicted == nil ? 0 : 0.42))
+            // Wacht op de melding van de pagina; komt die niet (of is er geen pin-ID), dan vragen we het zelf
+            var target: CGRect?
+            var status = "ok"
+            if !pinId.isEmpty, let known = await waitForReady(pinId: pinId, since: tapped, timeout: 0.9) {
+                target = known.rect
+                status = known.status
+            } else if gen == generation {
+                target = await waitForRect(Self.closeupImageJS, timeout: 1.8, minWait: max(switchDelay, predicted == nil ? 0 : 0.42))
+            }
+            guard gen == generation else { return }   // intussen gereset: niets meer aanraken
+            if pendingPinId == pinId { pendingPinId = nil }
             if let target, let path = webView.url?.path {
                 closeupImage = (path, target)
                 // Klein stukje bijschuiven als de echte plek iets anders is dan voorspeld
                 let close = predicted.map { abs($0.minX - target.minX) < 3 && abs($0.minY - target.minY) < 3 &&
                                             abs($0.width - target.width) < 3 } ?? false
-                UIView.animate(withDuration: close ? 0.01 : (predicted == nil ? 0.38 : 0.24), delay: 0,
+                // Bij "safe" (Pinterests eigen opmaak) wijkt de plek vaak flink af van de voorspelling: rustiger bijschuiven
+                let duration = close ? 0.01 : (predicted == nil || status != "ok" ? 0.38 : 0.24)
+                UIView.animate(withDuration: duration, delay: 0,
                                usingSpringWithDamping: 0.9, initialSpringVelocity: 0) {
                     Self.move(image, from: rect, to: target)
                 } completion: { _ in
-                    self.fadeOut(container, duration: 0.14)
+                    // Is de plek intussen nog veranderd (afbeelding laadde later)? Dan nog één keer bijschuiven
+                    if gen == self.generation, !pinId.isEmpty, let late = self.ready,
+                       Self.pinId(from: late.path) == pinId, late.at >= tapped,
+                       abs(late.rect.minX - target.minX) > 3 || abs(late.rect.minY - target.minY) > 3 ||
+                       abs(late.rect.width - target.width) > 3 {
+                        UIView.animate(withDuration: 0.2, delay: 0, options: .curveEaseOut) {
+                            Self.move(image, from: rect, to: late.rect)
+                        } completion: { _ in self.fadeOut(container, duration: 0.14) }
+                    } else {
+                        self.fadeOut(container, duration: 0.14)
+                    }
                 }
             } else {
                 fadeOut(container, duration: 0.2)
@@ -86,17 +136,24 @@ final class PinTransitions {
         }
     }
 
-    // Waar de grote afbeelding ongeveer komt: links, 16 pt van de rand, bovenaan, zo hoog als onze
-    // pin-opmaak toelaat. Alleen liggend en breed genoeg (anders gebruikt Pinterest een andere opmaak).
+    // Waar de grote afbeelding ongeveer komt, op basis van hoe onze pin-opmaak de vorige keer uitpakte
+    // (zelfde rekensom als in PageTweaks.swift: links en boven zoals toen, zo hoog als de ruimte toelaat,
+    // maximaal 12% groter). Zonder eerdere uitkomst, of als die "safe" was, geen voorspelling: dan wacht
+    // de kopie op de echte plek.
     private func predictedCloseupRect(for source: CGRect) -> CGRect? {
-        guard let webView, webView.bounds.width > webView.bounds.height, webView.bounds.width >= 1000 else { return nil }
+        guard let webView, webView.bounds.width > webView.bounds.height, webView.bounds.width >= 1000,
+              lastStatus == "ok", let known = knownLayout, known.natW > 100, known.natH > 100,
+              abs(known.viewWidth - webView.bounds.width) < 1 else { return nil }
         let aspect = source.width / max(source.height, 1)
-        let top: CGFloat = 20
-        var height = min(webView.bounds.height - top - 150, 555 * 1.12)
-        var width = height * aspect
-        let maxWidth: CGFloat = 508 * 1.12
-        if width > maxWidth { width = maxWidth; height = width / aspect }
-        return CGRect(x: 16, y: top, width: width, height: height)
+        // Pinterest maakt het pinblok zo hoog als de afbeelding (breedte / verhouding), tot een maximum
+        let natH = min(known.natW / max(aspect, 0.1), known.maxNatH)
+        let room = webView.bounds.height - known.top - 150
+        let scale = max(1, min(1.12, room / max(natH, 1)))
+        var width = known.natW * scale
+        var height = natH * scale
+        // De afbeelding zelf past in het blok, met dezelfde verhouding als de pin
+        if width / max(height, 1) > aspect { width = height * aspect } else { height = width / aspect }
+        return CGRect(x: known.left, y: known.top, width: width, height: height)
     }
 
     // Laat JavaScript de vastgehouden klik doorgeven aan Pinterest
@@ -144,7 +201,7 @@ final class PinTransitions {
 
         var image: UIView?
         var imageRect = CGRect.zero
-        if let info = closeupImage, info.path == path,
+        if let info = closeupImage, !pinId.isEmpty, Self.pinId(from: info.path) == pinId,
            let snap = webView.resizableSnapshotView(from: info.rect, afterScreenUpdates: false, withCapInsets: .zero) {
             imageRect = info.rect
             snap.frame = imageRect
@@ -239,16 +296,84 @@ final class PinTransitions {
 
     // MARK: Hulpjes
 
-    // Nieuwe pinpagina (ook zonder animatie geopend): onthoud waar de grote afbeelding staat
+    // Nieuwe pinpagina (ook zonder animatie geopend): onthoud waar de grote afbeelding staat.
+    // Dat komt normaal uit de melding van de pagina (closeupReady); pas als die uitblijft vragen we het zelf.
     func pageChanged() {
-        guard let webView, let path = webView.url?.path, path.contains("/pin/") else { return }
-        if closeupImage?.path == path { return }
-        Task {
-            if let rect = await waitForRect(Self.closeupImageJS, timeout: 2.5, minWait: switchDelay),
-               webView.url?.path == path {
-                closeupImage = (path, rect)
-            }
+        guard let webView, let path = webView.url?.path else { return }
+        guard path.contains("/pin/") else {
+            // Terug in de feed: meldingen en wachttaken van de pinpagina zijn verouderd
+            ready = nil
+            return
         }
+        let pinId = Self.pinId(from: path)
+        if !pinId.isEmpty, Self.pinId(from: closeupImage?.path) == pinId { return }   // plek al bekend
+        if pendingPinId == pinId { return }   // pinTapped of een eerdere aanroep wacht hier al op
+        pendingPinId = pinId.isEmpty ? nil : pinId
+        let gen = generation
+        Task {
+            var rect: CGRect?
+            if !pinId.isEmpty { rect = await waitForReady(pinId: pinId, since: .distantPast, timeout: 1.5)?.rect }
+            if rect == nil, gen == generation {
+                rect = await waitForRect(Self.closeupImageJS, timeout: 2.5, minWait: switchDelay)
+            }
+            guard gen == generation else { return }
+            if pendingPinId == pinId { pendingPinId = nil }
+            if let rect, webView.url?.path == path { closeupImage = (path, rect) }
+        }
+    }
+
+    // Alles direct stoppen, zonder animatie: overlay weg, sleepgebaar beëindigd, wachttaken geannuleerd.
+    // Voor als de interactie onderbroken wordt (app naar de achtergrond, pagina herladen, venster verandert).
+    func reset() {
+        generation += 1
+        overlay?.removeFromSuperview()
+        overlay = nil
+        if let drag {
+            drag.container.removeFromSuperview()
+            self.drag = nil
+        }
+        pendingPinId = nil
+        ready = nil
+        webView?.scrollView.isScrollEnabled = true   // het sleepgebaar zette scrollen uit
+    }
+
+    // MARK: Meldingen van de pagina (via LayoutBridge)
+
+    // De pinpagina is klaar: opmaak toegepast en gecontroleerd, met de plek van de afbeelding in punten
+    func closeupReady(path: String, status: String, rect: CGRect, natSize: CGSize) {
+        guard rect.width > 20, rect.height > 20 else { return }
+        ready = (path, rect, status, Date())
+        closeupImage = (path, rect)
+        lastStatus = status == "ok" ? "ok" : "safe"
+        // Bij een geslaagde eigen opmaak onthouden we de maten voor de volgende voorspelling
+        guard status == "ok", natSize.width > 100, natSize.height > 100, let webView else { return }
+        let maxNatH = max(natSize.height, knownLayout?.maxNatH ?? 0)
+        let layout = KnownLayout(natW: natSize.width, natH: natSize.height, maxNatH: maxNatH,
+                                 left: rect.minX, top: rect.minY, viewWidth: webView.bounds.width)
+        knownLayout = layout
+        if let data = try? JSONEncoder().encode(layout) { UserDefaults.standard.set(data, forKey: "pfKnownLayout") }
+    }
+
+    // De viewport is gewisseld (columnsJS). De pagina kan daarbij zijwaarts verschoven blijven staan,
+    // waardoor een pin aan de zijkant afgesneden lijkt; als er niets zijwaarts te scrollen valt zetten we hem recht.
+    func viewportSettled() {
+        guard let sv = webView?.scrollView, !sv.isDragging else { return }
+        let left = -sv.adjustedContentInset.left
+        if abs(sv.contentOffset.x - left) > 0.5, sv.contentSize.width <= sv.bounds.width + 1 {
+            sv.setContentOffset(CGPoint(x: left, y: sv.contentOffset.y), animated: false)
+        }
+    }
+
+    // Wacht (zonder de pagina te bevragen) tot de melding voor deze pin binnen is
+    private func waitForReady(pinId: String, since: Date, timeout: TimeInterval) async -> (rect: CGRect, status: String)? {
+        let gen = generation
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if gen != generation || webView == nil { return nil }
+            if let r = ready, r.at >= since, Self.pinId(from: r.path) == pinId { return (r.rect, r.status) }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        return nil
     }
 
     private func fadeOut(_ view: UIView, duration: TimeInterval) {
@@ -279,9 +404,10 @@ final class PinTransitions {
         let start = Date()
         let deadline = start.addingTimeInterval(timeout)
         var previous: CGRect?
+        let gen = generation
         while Date() < deadline {
             try? await Task.sleep(nanoseconds: 60_000_000)
-            guard let webView else { return nil }
+            guard let webView, gen == generation else { return nil }
             guard let text = try? await webView.evaluateJavaScript(js) as? String,
                   let rect = Self.rect(from: text) else { continue }
             if let p = previous, abs(p.minX - rect.minX) < 2, abs(p.minY - rect.minY) < 2,
@@ -337,6 +463,33 @@ final class PinTransitions {
           return JSON.stringify({ x: r.left * s, y: r.top * s, w: r.width * s, h: r.height * s });
         })()
         """
+    }
+}
+
+// Brug van de pagina naar de app voor de opmaak van een geopende pin (handler "pfLayout"):
+// - closeupReady: de pinpagina is klaar (opmaak toegepast en gecontroleerd), met de plek van de afbeelding
+//   in punten van de webview en de natuurlijke maat van het pinblok (PageTweaks.swift)
+// - viewportSettled: de viewport is echt gewisseld (Columns.swift)
+// Los van NativeBridge ("pfNative"), zodat de twee niet in elkaars weg zitten.
+final class LayoutBridge: NSObject, WKScriptMessageHandler {
+    weak var transitions: PinTransitions?
+
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        let n = { (key: String) in CGFloat((body[key] as? NSNumber)?.doubleValue ?? 0) }
+        switch type {
+        case "closeupReady":
+            let path = (body["path"] as? String) ?? ""
+            let status = (body["status"] as? String) ?? "ok"
+            let rect = CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h"))
+            let natSize = CGSize(width: n("nw"), height: n("nh"))
+            MainActor.assumeIsolated { transitions?.closeupReady(path: path, status: status, rect: rect, natSize: natSize) }
+        case "viewportSettled":
+            MainActor.assumeIsolated { transitions?.viewportSettled() }
+        default:
+            break
+        }
     }
 }
 
