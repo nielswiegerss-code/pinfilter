@@ -1,1 +1,0 @@
-v2.0: YouTube in Pins (Abonnementen als start, zonder advertenties en Shorts, achtergrond afspelen, beeld-in-beeld) via de wisselknop rechts. Lang indrukken reageert direct, met een nieuwe optie Delen. Geopende pins worden gecontroleerd op afsnijden. Startscherm, laadbalk, geen-verbinding-scherm en herstel na crashes. Externe links openen in een los venster.
