@@ -6,15 +6,34 @@ import WebKit
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var site = SiteModel()
 
     var body: some View {
         GeometryReader { geo in
-            PinterestView()
-                .ignoresSafeArea(edges: .bottom)
-                .overlay(alignment: .bottomTrailing) {
-                    // Kolommenknop alleen liggend; staand bepaalt Pinterest het zelf
-                    if geo.size.width > geo.size.height { ColumnButton() }
+            // Beide weergaven blijven in de hiërarchie zodra ze bestaan (nooit een "if" om een webview heen:
+            // dat zou hem weggooien en een spelende video stoppen). Wisselen = doorzichtigheid.
+            // YouTube wordt pas bij de eerste keer wisselen gemaakt, zodat het opstarten van Pinterest gelijk blijft.
+            ZStack {
+                PinterestView()
+                    .opacity(site.current == .pinterest ? 1 : 0)
+                    .allowsHitTesting(site.current == .pinterest)
+                    .accessibilityHidden(site.current != .pinterest)
+                if site.youtubeStarted {
+                    YouTubeView(model: site, active: site.current == .youtube)
+                        .opacity(site.current == .youtube ? 1 : 0)
+                        .allowsHitTesting(site.current == .youtube)
+                        .accessibilityHidden(site.current != .youtube)
                 }
+            }
+            .ignoresSafeArea(edges: .bottom)
+            .overlay(alignment: .bottomTrailing) {
+                // Kolommenknop alleen op Pinterest en liggend; staand bepaalt Pinterest het zelf
+                if site.current == .pinterest && geo.size.width > geo.size.height { ColumnButton() }
+            }
+            .overlay(alignment: .topTrailing) {
+                SiteSwitcher(model: site, size: geo.size)
+            }
+            .animation(.easeInOut(duration: 0.2), value: site.current)
         }
         .onChange(of: scenePhase) { _, phase in
                 // .inactive komt vóór .background, dus er is nog tijd om de cookies te bewaren
