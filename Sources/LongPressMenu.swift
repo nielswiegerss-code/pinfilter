@@ -52,6 +52,8 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
     private var notPinAt: CFTimeInterval = 0   // laatste keer dat de pagina meldde: hier zit geen pin
     private var touchDown: CFTimeInterval = 0  // begin van de huidige aanraking (UITouch.timestamp)
     private var previewOrigin = CGPoint.zero
+    private var touchStart = CGPoint.zero      // waar de vinger neerkwam (voor de bewegingscontrole van de preview)
+    private weak var fading: UIView?           // laag die nog wegvaagt na cancelLift
     private var liftRect = CGRect.zero         // pin in webview-punten (voor de popover van Share)
     private var pinURL: URL?
     private var idleTask: Task<Void, Never>?
@@ -97,6 +99,7 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         touchDown = touch.timestamp
+        if let webView { touchStart = touch.location(in: webView) }
         return true
     }
 
@@ -117,8 +120,12 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
             if !committed { startLift(at: p) }
         case .changed:
             // Gaat de vinger toch bewegen (scrollen), dan verdwijnt het optillen weer
-            if !committed && hypot(p.x - previewOrigin.x, p.y - previewOrigin.y) > 10 { cancelLift() }
-        case .ended, .cancelled, .failed:
+            // (gemeten vanaf de plek van neerkomen, net als allowableMovement van het menu-gebaar)
+            if !committed && hypot(p.x - touchStart.x, p.y - touchStart.y) > 10 { cancelLift() }
+        case .ended:
+            // Vinger omhoog: een tik die hierna binnenkomt mag geen half wegvagende laag meer vinden
+            if !committed { cancelLift(animated: false) }
+        case .cancelled, .failed:
             if !committed { cancelLift() }
         default:
             break
@@ -326,7 +333,7 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
     }
 
     // Vinger weg of aan het scrollen voordat het menu opende: kort terugvallen en opruimen
-    private func cancelLift() {
+    private func cancelLift(animated: Bool = true) {
         waitingForPrefetch = false
         previewTask?.cancel()
         guard let container = overlay, !committed else { return }
@@ -335,11 +342,17 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
         self.lift = nil
         self.dim = nil
         container.isUserInteractionEnabled = false
+        guard animated else {
+            container.removeFromSuperview()
+            return
+        }
+        fading = container
         UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
             lift?.transform = .identity
             dim?.alpha = 0
-        } completion: { _ in
+        } completion: { [weak self] _ in
             container.removeFromSuperview()
+            if self?.fading === container { self?.fading = nil }
         }
         lift?.layer.shadowOpacity = 0
         removeLater(container)
@@ -350,6 +363,12 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
     func dropLift() {
         waitingForPrefetch = false
         previewTask?.cancel()
+        // Ook een laag die nog wegvaagt (vinger net omhoog) moet weg voordat de momentopname wordt gemaakt
+        if let fading {
+            fading.layer.removeAllAnimations()
+            fading.removeFromSuperview()
+            self.fading = nil
+        }
         guard !committed, let container = overlay else { return }
         overlay = nil
         lift = nil
@@ -362,6 +381,8 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
         idleTask?.cancel()
         previewTask?.cancel()
         session += 1
+        fading?.removeFromSuperview()
+        fading = nil
         overlay?.removeFromSuperview()
         overlay = nil
         dim = nil
