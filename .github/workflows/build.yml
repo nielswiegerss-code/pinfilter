@@ -6,19 +6,43 @@ on:
 permissions:
   contents: write
 jobs:
+  # Snelle controle op Linux (gratis en binnen een halve minuut), vóór de dure macOS-build:
+  # de scripts in de Swift-bestanden kloppen syntactisch en het advertentiefilter werkt nog.
+  check-js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: JavaScript controleren
+        run: python3 scripts/check_js.py
+
   build:
+    needs: check-js
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: brew install xcodegen
       - run: xcodegen generate
-      - name: Versie bepalen
-        # Bij een tag (v1.2) wordt dat de versie; het buildnummer loopt altijd op
+      - name: Toolchain
+        # Zichtbaar in het log, zodat een nieuwe Xcode op macos-latest meteen opvalt
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          sw_vers
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
+      - name: Versie bepalen
+        # Bij een tag (v2.0) wordt dat de versie; het buildnummer loopt altijd op.
+        # Alleen vMAJOR.MINOR of vMAJOR.MINOR.PATCH: zo'n tag als v2.0-beta of V2.0 geeft een onbruikbare
+        # versie in SideStore en een download-URL die niet bestaat, dus dan stoppen we meteen.
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+              echo "Ongeldige tag: $GITHUB_REF_NAME (verwacht bijvoorbeeld v2.0 of v2.0.1)"
+              exit 1
+            fi
             echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+            echo "APP_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
           else
             echo "APP_VERSION=0.0" >> "$GITHUB_ENV"
+            echo "APP_TAG=" >> "$GITHUB_ENV"
           fi
           echo "APP_BUILD=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
       - name: Build (unsigned)
@@ -30,15 +54,26 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
       - name: Package IPA
+        # Xcode weet niet zeker of UIBackgroundModes via INFOPLIST_KEY_* in de gegenereerde Info.plist
+        # komt, dus zetten we de sleutel hier zelf in de gebouwde Info.plist (achtergrondgeluid voor
+        # video's). De build is niet ondertekend en SideStore tekent opnieuw, dus dit is veilig.
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/PinFilter.app Payload/
+          PLIST=Payload/PinFilter.app/Info.plist
+          plutil -remove UIBackgroundModes "$PLIST" 2>/dev/null || true
+          plutil -insert UIBackgroundModes -json '["audio"]' "$PLIST"
+          plutil -extract UIBackgroundModes json -o - "$PLIST" | grep -q audio || { echo "UIBackgroundModes ontbreekt"; exit 1; }
           zip -qry PinFilter.ipa Payload
           unzip -l PinFilter.ipa | head -20
-          plutil -p Payload/PinFilter.app/Info.plist | grep -E 'CFBundle(ShortVersionString|Version|Identifier)"'
+          plutil -p "$PLIST"
       - name: SideStore-bron maken
         run: python3 scripts/make_source.py "$APP_VERSION" "$APP_BUILD" PinFilter.ipa
-      - uses: actions/upload-artifact@v4
+      - name: Pakket en bron controleren
+        # Faalt (en publiceert dus niets) als naam, bundle-ID, versie, buildnummer, achtergrondgeluid,
+        # bestandsgrootte of download-URL niet kloppen
+        run: python3 scripts/verify_build.py PinFilter.ipa source.json "$APP_VERSION" "$APP_BUILD" "$APP_TAG"
+      - uses: actions/upload-artifact@v7
         with:
           name: PinFilter-ipa
           path: |
@@ -48,6 +83,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          make_latest: true
+          fail_on_unmatched_files: true
           files: |
             PinFilter.ipa
             source.json
