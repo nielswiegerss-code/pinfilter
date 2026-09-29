@@ -7,26 +7,73 @@ import WebKit
 // - Save: "Save", waarna Pinterest de bordkeuze toont (de pin gaat niet open).
 // - Hide: "See less", zodat Pinterest minder van dit soort pins laat zien.
 
-// Brug van JavaScript naar de app: trillen, en scrollen uit/aan zolang het menu open is
+// Trilfeedback op één plek, met voorbereide generators: de eerste trilling na een pauze komt anders
+// tientallen milliseconden te laat. prepare() houdt de Taptic Engine wakker.
+@MainActor
+enum PinHaptics {
+    private static let medium = UIImpactFeedbackGenerator(style: .medium)
+    private static let lightImpact = UIImpactFeedbackGenerator(style: .light)
+    private static let selection = UISelectionFeedbackGenerator()
+    private static let notification = UINotificationFeedbackGenerator()
+
+    static func prepare() {
+        medium.prepare()
+        lightImpact.prepare()
+        selection.prepare()
+    }
+
+    static func impact() { medium.impactOccurred(); medium.prepare() }
+    static func light() { lightImpact.impactOccurred(); lightImpact.prepare() }
+    static func tick() { selection.selectionChanged(); selection.prepare() }
+    static func success() { notification.notificationOccurred(.success) }
+    static func warning() { notification.notificationOccurred(.warning) }
+
+    // Vanuit JavaScript: {type:'haptic', kind:'success'|'warning'|...}
+    static func play(_ kind: String) {
+        switch kind {
+        case "success": success()
+        case "warning", "error": warning()
+        case "select": tick()
+        default: light()
+        }
+    }
+}
+
+// Brug van JavaScript naar de app: trillen, de plek van een pin bij touchstart (lang-indrukken-menu)
+// en een tik op een pin (open-animatie)
 final class NativeBridge: NSObject, WKScriptMessageHandler {
     weak var webView: WKWebView?
     weak var transitions: PinTransitions?
-    private let generator = UIImpactFeedbackGenerator(style: .medium)
+    weak var longPress: LongPressMenu?
 
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        let n = { (key: String) in CGFloat((body[key] as? NSNumber)?.doubleValue ?? 0) }
         switch type {
         case "haptic":
-            generator.impactOccurred()
-        case "scroll":
-            webView?.scrollView.isScrollEnabled = (body["on"] as? Bool) ?? true
+            let kind = (body["kind"] as? String) ?? ""
+            MainActor.assumeIsolated { PinHaptics.play(kind) }
+        case "pressStart":
+            // Aanraking begonnen: waar staat de pin onder de vinger? (in punten van de webview)
+            let ok = (body["ok"] as? Bool) ?? false
+            let href = (body["href"] as? String) ?? ""
+            MainActor.assumeIsolated {
+                if ok {
+                    longPress?.prefetched(rect: CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h")),
+                                          finger: CGPoint(x: n("fx"), y: n("fy")), href: href)
+                } else {
+                    longPress?.prefetchMissed()
+                }
+            }
         case "pinTap":
             // Tik op een pin in het raster: open-animatie starten (zie Transitions.swift)
-            let n = { (key: String) in CGFloat((body[key] as? NSNumber)?.doubleValue ?? 0) }
             let rect = CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h"))
             let pinId = (body["pinId"] as? String) ?? ""
-            MainActor.assumeIsolated { transitions?.pinTapped(rect: rect, pinId: pinId) }
+            MainActor.assumeIsolated {
+                longPress?.dropLift()   // een half getoonde lift mag niet in de momentopname van het scherm
+                transitions?.pinTapped(rect: rect, pinId: pinId)
+            }
         default:
             break
         }
@@ -36,15 +83,12 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
 let pinSaveJS = #"""
 (() => {
   'use strict';
-  const MOVE_CANCEL = 10;   // zoveel pixels bewegen = scrollen, geen indrukken
-
-  // iOS-"afbeelding bewaren" en tekstselectie uitzetten op pins (erft door naar alles erin)
+  // iOS-"afbeelding bewaren" en tekstselectie uitzetten op pins (erft door naar alles erin).
+  // Het indruk-effect (pin optillen) doet de app zelf, native (LongPressMenu.swift); in de pagina
+  // gebeurt daarvoor niets meer, zodat de momentopname de pin altijd ongeschaald ziet.
   const style = document.createElement('style');
   style.textContent =
     '[data-grid-item] { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; }' +
-    // Indruk-effect: de pin veert iets in zolang je hem aanraakt
-    '[data-grid-item] > * { transition: transform .2s cubic-bezier(.2,.8,.3,1); }' +
-    '[data-grid-item].pf-press > * { transform: scale(.96); }' +
     // Tijdens een actie het "…"-menu van Pinterest onzichtbaar houden
     'html.pf-quiet [role="dialog"], html.pf-quiet [aria-modal="true"] { opacity: 0 !important; }' +
     '#pf-toast { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); z-index: 2147483647;' +
@@ -63,7 +107,7 @@ let pinSaveJS = #"""
   const hideToast = () => { const t = document.getElementById('pf-toast'); if (t) t.remove(); };
 
   const native = (msg) => { try { webkit.messageHandlers.pfNative.postMessage(msg); } catch (e) {} };
-  const haptic = () => native({ type: 'haptic' });
+  const haptic = (kind) => native({ type: 'haptic', kind });
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   // --- Pinterests eigen knoppen vinden ---
@@ -95,10 +139,33 @@ let pinSaveJS = #"""
   const findOutsideGrid = (selectors, test) =>
     pick(document, selectors, outsideGrid) || clickables(document).find((b) => outsideGrid(b) && test(b));
 
-  const waitFor = async (fn, ms, step = 50) => {
-    for (let t = 0; t < ms; t += step) { const el = fn(); if (el) return el; await sleep(step); }
-    return null;
-  };
+  // Wacht tot fn() iets teruggeeft (of ms om zijn). Een MutationObserver controleert meteen na een
+  // wijziging in de pagina (hooguit één keer per beeldframe), zodat een menu direct wordt opgemerkt;
+  // het interval vangt veranderingen op die geen DOM-wijziging zijn (bijv. een stijl).
+  const waitFor = (fn, ms, step = 50) => new Promise((resolve, reject) => {
+    let done = false, queued = false, poll = 0, timer = 0, observer = null;
+    const end = (fin, value) => {
+      if (done) return;
+      done = true;
+      clearInterval(poll); clearTimeout(timer);
+      if (observer) observer.disconnect();
+      fin(value);
+    };
+    const check = () => {
+      queued = false;
+      if (done) return;
+      try { const el = fn(); if (el) end(resolve, el); } catch (e) { end(reject, e); }
+    };
+    check();
+    if (done) return;
+    observer = new MutationObserver(() => { if (!queued && !done) { queued = true; requestAnimationFrame(check); } });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    poll = setInterval(check, step);
+    timer = setTimeout(() => {
+      if (done) return;
+      try { end(resolve, fn() || null); } catch (e) { end(reject, e); }
+    }, ms);
+  });
 
   // Als iets niet lukt: laat zien welke knoppen er wél zijn, zodat het te repareren is
   const diagnose = (root, what) => {
@@ -106,6 +173,7 @@ let pinSaveJS = #"""
       .filter((b) => root !== document || outsideGrid(b))
       .map((b) => b.getAttribute('data-test-id') || b.getAttribute('aria-label') || (b.textContent || '').trim().slice(0, 24))
       .filter(Boolean);
+    haptic('warning');
     toast(what + ' niet gevonden. Maak een screenshot voor Claude:\n' + [...new Set(found)].slice(0, 30).join(' · '), 15000);
   };
 
@@ -188,6 +256,7 @@ let pinSaveJS = #"""
       if (layer) { layerOpacity = layer.style.opacity; layer.style.opacity = '0'; }
 
       pressButton(option);
+      haptic('success');
       // Pas weer zichtbaar maken als Pinterests menu echt weg is (daarna komt bijv. de bordkeuze)
       await waitFor(() => !option.isConnected || !visible(option), 1500);
       await sleep(60);
@@ -218,6 +287,7 @@ let pinSaveJS = #"""
       if (!btn) { diagnose(document, 'Save-knop op de pinpagina'); return; }
       const pinURL = location.href;
       pressButton(btn);
+      haptic('success');
       if (await waitFor(dialogOpen, 1500)) {
         await waitFor(() => !dialogOpen(), 180000, 200);
         await sleep(400);
@@ -234,12 +304,14 @@ let pinSaveJS = #"""
   };
 
   // --- Samenwerking met het lang-indrukken-menu van de app (LongPressMenu.swift) ---
-  // De app tekent het menu zelf en volgt de vinger. Hier alleen: welke pin zit onder de vinger,
-  // Pinterest de aanraking afpakken, en de gekozen actie uitvoeren.
+  // De app tekent het menu zelf en volgt de vinger. Hier: bij touchstart de plek van de pin naar de
+  // app sturen (zodat die niet op een antwoord hoeft te wachten), Pinterest de aanraking afpakken,
+  // en de gekozen actie uitvoeren.
 
   let menuItem = null;      // pin waarvoor het menu open is
   let menuTouch = false;    // de aanraking die het menu opende loopt nog: niet aan Pinterest geven
   let swallowClick = false; // een tik direct na het menu niet als "pin openen" laten tellen
+  let swallowTimer = 0, menuTouchTimer = 0;
 
   // Pinterest heeft zelf ook een "lang indrukken"-menu: vertel het dat de aanraking is geannuleerd
   const cancelPageGesture = (target) => {
@@ -253,7 +325,16 @@ let pinSaveJS = #"""
 
   const releaseSoon = () => setTimeout(() => { swallowClick = false; }, 400);
 
-  // De app vraagt: zit er een pin op dit punt (in punten van de webview)? Zo ja: waar staat de afbeelding?
+  // Absolute link naar de pin (zonder zoekopdracht), voor het deelmenu
+  const pinHref = (item) => {
+    const a = item && item.querySelector('a[href*="/pin/"]');
+    if (!a) return '';
+    try { const u = new URL(a.getAttribute('href'), location.href); return u.origin + u.pathname; } catch (e) { return ''; }
+  };
+
+  // De app vraagt: zit er een pin op dit punt (in punten van de webview)? Zo ja: pagina afschermen en
+  // de plek van de afbeelding teruggeven. Normaal wacht de app hier niet meer op (het gaat "fire and
+  // forget"); het antwoord dient alleen als controle en als terugval.
   window.__pfMenuAt = (x, y) => {
     const s = (window.visualViewport && visualViewport.scale) || 1;
     const el = document.elementFromPoint(x / s, y / s);
@@ -263,59 +344,59 @@ let pinSaveJS = #"""
     menuItem = item;
     menuTouch = true;
     swallowClick = true;
-    pressEnd();
+    // Vangnet: blijft dit om wat voor reden ook hangen, dan geeft de pagina zichzelf weer vrij.
+    // (Zolang het menu open is ligt de app-laag over de pagina, dus tikken komen er toch niet door.)
+    clearTimeout(swallowTimer); swallowTimer = setTimeout(() => { swallowClick = false; }, 1500);
+    clearTimeout(menuTouchTimer); menuTouchTimer = setTimeout(() => { menuTouch = false; }, 8000);
     cancelPageGesture(el);
     const r = img.getBoundingClientRect();
-    return JSON.stringify({ x: r.left * s, y: r.top * s, w: r.width * s, h: r.height * s });
+    return JSON.stringify({ x: r.left * s, y: r.top * s, w: r.width * s, h: r.height * s, href: pinHref(item) });
   };
 
-  window.__pfMenuClose = () => { menuItem = null; menuTouch = false; releaseSoon(); return 'ok'; };
+  window.__pfMenuClose = () => {
+    menuItem = null; menuTouch = false;
+    clearTimeout(menuTouchTimer);
+    releaseSoon();
+    return 'ok';
+  };
 
   window.__pfRun = (key) => {
     const item = menuItem;
     menuItem = null;
     menuTouch = false;
+    clearTimeout(menuTouchTimer);
     releaseSoon();
     if (item && actions[key]) setTimeout(() => actions[key](item).catch((e) => toast('Fout: ' + e)), 0);
     return 'ok';
   };
 
-  // --- Aanraken: alleen nog het indruk-effect en het afschermen van Pinterest ---
-  // touchstart/touchmove zijn "passive": ze houden het scrollen nooit op.
-
-  let pressed = null, pressTimer = null, startX = 0, startY = 0;
-  const pressEnd = () => {
-    clearTimeout(pressTimer);
-    if (pressed) { pressed.classList.remove('pf-press'); pressed = null; }
-  };
-  // Indruk-effect pas na een korte vertraging, zodat het niet knippert als je gewoon scrolt
-  const pressStart = (item) => {
-    pressEnd();
-    pressTimer = setTimeout(() => { pressed = item; item.classList.add('pf-press'); }, 70);
-  };
+  // --- Aanraken ---
+  // Bij touchstart op een pin meteen de plek van de afbeelding naar de app sturen, VÓÓR er iets
+  // aan de pagina verandert (dus de ongeschaalde plek). De app gebruikt dat om bij lang indrukken
+  // zonder wachten de pin op te tillen. Buiten een pin (of bij meer vingers) sturen we ok:false,
+  // zodat de app een oude plek weggooit. touchstart/touchmove zijn "passive": scrollen houdt nooit op.
 
   document.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) { pressEnd(); return; }
+    if (e.touches.length !== 1) { native({ type: 'pressStart', ok: false }); return; }
     const t = e.touches[0];
     const item = e.target.closest && e.target.closest('[data-grid-item]');
-    if (!item) return;
-    startX = t.clientX; startY = t.clientY;
-    pressStart(item);
+    const img = item && item.querySelector('img');
+    if (!img) { native({ type: 'pressStart', ok: false }); return; }
+    const s = (window.visualViewport && visualViewport.scale) || 1;
+    const r = img.getBoundingClientRect();
+    native({ type: 'pressStart', ok: true, fx: t.clientX * s, fy: t.clientY * s,
+             x: r.left * s, y: r.top * s, w: r.width * s, h: r.height * s, href: pinHref(item) });
   }, { capture: true, passive: true });
 
   document.addEventListener('touchmove', (e) => {
-    if (menuTouch) { e.stopPropagation(); return; }
-    const t = e.touches[0];
-    if (t && Math.hypot(t.clientX - startX, t.clientY - startY) > MOVE_CANCEL) pressEnd();
+    if (menuTouch) e.stopPropagation();
   }, { capture: true, passive: true });
 
   document.addEventListener('touchend', (e) => {
-    setTimeout(pressEnd, 60);   // heel even laten staan, zodat een snelle tik ook zichtbaar veert
     if (menuTouch) { menuTouch = false; e.preventDefault(); e.stopPropagation(); }
   }, { capture: true, passive: false });
 
   document.addEventListener('touchcancel', (e) => {
-    pressEnd();
     if (e.isTrusted) menuTouch = false;
   }, { capture: true, passive: true });
 

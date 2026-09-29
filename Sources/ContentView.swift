@@ -85,6 +85,7 @@ struct PinterestView: UIViewRepresentable {
         let layoutBridge = LayoutBridge()   // meldingen over de pin-opmaak en viewport (zie Transitions.swift)
         layoutBridge.transitions = context.coordinator.transitions
         webView.configuration.userContentController.add(layoutBridge, name: "pfLayout")
+        bridge.longPress = context.coordinator.longPressMenu   // plek van de pin bij touchstart (zie PinSave.swift)
         ColumnSetting.shared.webView = webView
 
         // Eerst de bewaarde login terugzetten, pas daarna de pagina laden
