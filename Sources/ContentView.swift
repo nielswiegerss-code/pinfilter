@@ -82,6 +82,7 @@ struct PinterestView: UIViewRepresentable {
         context.coordinator.attach(webView, refresh: refresh)
         bridge.webView = webView
         bridge.transitions = context.coordinator.transitions
+        bridge.longPress = context.coordinator.longPressMenu   // plek van de pin bij touchstart (zie PinSave.swift)
         ColumnSetting.shared.webView = webView
 
         // Eerst de bewaarde login terugzetten, pas daarna de pagina laden
