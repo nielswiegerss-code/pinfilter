@@ -1,8 +1,8 @@
 import SwiftUI
 
 // Kleine ronde knop aan de rechterrand (ongeveer halverwege): tik = wisselen tussen Pinterest en YouTube.
-// Verticaal te slepen (de plek wordt onthouden). Lang indrukken terwijl YouTube open staat = pagina-analyse
-// van de YouTube-weergave, met een YouTube-sectie (voor Claude, om filters bij te stellen).
+// Verticaal te slepen (de plek wordt onthouden). Lang indrukken = pagina-analyse van de site die open staat
+// (op YouTube met een YouTube-sectie), voor Claude om filters en opmaak bij te stellen.
 // Rechts halverwege is op beide sites vrij: bovenin staan hun koppen, onderin hun balken, links het terugvegen.
 struct SiteSwitcher: View {
     @ObservedObject var model: SiteModel
@@ -30,9 +30,18 @@ struct SiteSwitcher: View {
                     withAnimation(.easeInOut(duration: 0.2)) { model.toggle() }
                 }
                 .onLongPressGesture(minimumDuration: 0.7) {
-                    guard model.current == .youtube else { return }
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    Task { report = await model.youtubeReport() }
+                    if model.current == .youtube {
+                        Task { report = await model.youtubeReport() }
+                    } else {
+                        // Pinterest: dezelfde analyse als lang drukken op de kolommenknop, maar ook staand
+                        // en op een geopende pin bereikbaar, plus de tijden van het lang-indrukken-menu
+                        Task {
+                            let page = await PageReport.make(webView: ColumnSetting.shared.webView)
+                            let timings = LongPressMenu.timingSummary
+                            report = timings.isEmpty ? page : page + "\n\nLANG INDRUKKEN (ms)\n" + timings
+                        }
+                    }
                 }
                 .gesture(drag)
 
@@ -63,7 +72,7 @@ struct SiteSwitcher: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding()
                 }
-                .navigationTitle("YouTube-analyse")
+                .navigationTitle(model.current == .youtube ? "YouTube-analyse" : "Pagina-analyse")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) { Button("Sluit") { report = nil } }

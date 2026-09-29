@@ -232,7 +232,8 @@ struct PinterestView: UIViewRepresentable {
         // Alles wat tijdelijk over de pagina ligt of scrollen blokkeert direct opruimen: na een gecrasht
         // webproces, bij een formaatwissel of als het geheugen krap is.
         func resetInteractionState() {
-            // MERGE: transitions.reset(); longPressMenu.reset()
+            transitions.reset()
+            longPressMenu.reset()
             scrollLocks.removeAll()
             // Een lopend sleepgebaar afbreken (uit en weer aan zetten geeft .cancelled)
             if dismissPan.isEnabled {
@@ -248,6 +249,7 @@ struct PinterestView: UIViewRepresentable {
             let t = pan.translation(in: webView)
             switch pan.state {
             case .began:
+                longPressMenu.dropLift()   // een beginnend "optillen" van een pin mag niet blijven hangen
                 lockScroll("dismiss")   // de pagina eronder niet laten meescrollen
                 transitions.beginDrag()
             case .changed:

@@ -81,23 +81,6 @@ struct ColumnButton: View {
     }
 }
 
-// Klein, bijna onzichtbaar vlak (44 pt) waarmee de pagina-analyse in elke stand en op elke pagina
-// te openen is (lang indrukken, 0,8 s), ook staand en op een geopende pin waar de kolommenknop
-// ontbreekt. Plaats het in een hoek waar Pinterest zelf niets heeft.
-struct ReportHotspot: View {
-    @State private var report: String?
-
-    var body: some View {
-        Color.clear
-            .frame(width: 44, height: 44)
-            .contentShape(Rectangle())
-            .onLongPressGesture(minimumDuration: 0.8) {
-                Task { report = await PageReport.make(webView: ColumnSetting.shared.webView) }
-            }
-            .reportSheet($report)
-    }
-}
-
 extension View {
     // Toont de pagina-analyse als sheet zolang `report` gevuld is
     func reportSheet(_ report: Binding<String?>) -> some View {
