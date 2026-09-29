@@ -233,27 +233,78 @@ Het script maakt de opmaak alleen opnieuw als het pad, de breedte of de hoogte v
 
 De webview-achtergrond is `.systemBackground` met `isOpaque = false`, zodat er niets wit flitst.
 
-**Lang-indrukken-menu (v1.12, `LongPressMenu.swift`).** iOS tekent het menu zelf: een `UILongPressGestureRecognizer` van 0,45 s op de webview. `window.__pfMenuAt(x, y)` in `pinSaveJS` geeft de afbeeldingsrect van de pin onder de vinger en schermt het gebaar af voor Pinterest. Native tekent daarna het menu: de opgetilde snapshot, een dim-laag, SF Symbols en het label. Een keuze gaat naar `window.__pfRun(key)`.
+**Lang-indrukken-menu (v1.12, `LongPressMenu.swift`; in v2.0 sneller, zie hieronder).** iOS tekent het menu zelf: een `UILongPressGestureRecognizer` op de webview. `window.__pfMenuAt(x, y)` in `pinSaveJS` geeft de afbeeldingsrect van de pin onder de vinger en schermt het gebaar af voor Pinterest. Native tekent daarna het menu: de opgetilde snapshot, een dim-laag, SF Symbols en het label. Een keuze gaat naar `window.__pfRun(key)`.
 
 **Open-animatie.** Die vliegt direct naar `predictedCloseupRect`, dat is gebaseerd op onze eigen pin-opmaak, en schuift daarna bij naar de echte plek.
 
 ### Pagina-analyse
 
-Lang drukken op de kolommenknop opent een sheet met:
+Lang drukken op de kolommenknop, of op de wisselknop (die werkt ook staand en op een geopende pin), opent een sheet met:
 
-- de viewport- en schermmaten
-- de te brede elementen
-- een boom van `data-test-id`'s met maten en stijl
+- **als eerste regel een `OORDEEL`** voor afgesneden pins: `VIEWPORT STALE`, `ZOOM vv!=1 op pin`, `BUITEN`, `GEKNIPT`, `HORIZONTAAL SCROLLBAAR` of "geen probleem gemeten"
+- de status van de pin-opmaak (`ok`/`safe`) met de reden
+- de viewport- en schermmaten, en "venster vs scherm"
+- het gebeurtenislog (`window.__pfLog`)
+- de advertentievelden
+- de tijden van lang indrukken
+- een boom van `data-test-id`'s
+
+Op YouTube staat er een YouTube-sectie bij (`ytProbeJS`): hoeveel er is weggehaald, of de speler nog advertentievelden heeft, SSAP en de renderer-namen.
 
 Niels maakt daar screenshots van als Claude de ingelogde paginastructuur nodig heeft.
 
+## v2.0 (grote upgrade, gebouwd in vijf branches)
+
+**Rollback.** De IPA van de v1.12-Release blijft staan. SideStore kan die handmatig installeren, met hetzelfde bundle ID en dezelfde container.
+
+**Viewport en pin-opmaak (`Columns.swift`, `PageTweaks.swift`).**
+
+- Pinpagina's gebruiken Pinterests eigen viewport-meta; alleen de feed met 4 kolommen gebruikt `944@1.25`.
+- Na elke wissel wacht `startSettle()` tot `innerWidth`/`visualViewport.scale` echt kloppen (maximaal 2 s). Dan volgen `resize` en `viewportSettled`.
+- `layoutPin` rekent eerst uit of alles past en controleert na het toepassen (`verify`). Klopt iets niet, dan volgt `reset()` (volledig ongedaan maken) en krijgt de pin status `safe`: Pinterests eigen opmaak.
+- `closeupReady` gaat via een eigen handler `pfLayout` (`LayoutBridge` in `Transitions.swift`). De open-animatie wacht daarop; `predictedCloseupRect` gebruikt de laatst bekende opmaak.
+- `adProbeJS` is lui: het bewaart alleen de laatste payloads en scant pas als de analyse opengaat.
+
+**Lang indrukken (`LongPressMenu.swift`, `PinSave.swift`).**
+
+- `touchstart` stuurt meteen `pressStart` met de rect van de pin. Native heeft zo geen JS-rondreis meer nodig.
+- Na ongeveer 0,16 s begint de pin op te tillen; het menu komt bij ongeveer 0,33 s.
+- Opties: **Save**, **Hide** en **Share** (iOS-deelscherm met de pin-URL).
+- `.pf-press` is vervallen; native doet het indruk-effect.
+- `LongPressMenu.reset()`, `dropLift()` en tijdmetingen (`timingSummary`).
+
+**App-schil (`ContentView.swift`, `ShellSupport.swift`, `ShellLoadView.swift`).**
+
+- Startscherm, voortgangsbalk, een "geen verbinding"-scherm met opnieuw proberen, en herstel na een gecrasht webproces.
+- Pull-to-refresh draait door tot de pagina binnen is.
+- Links naar andere sites openen in SFSafariViewController. `mailto:`, `tel:` en andere systeemschema's gaan naar iOS. Google- en Apple-login blijven in de webview.
+- Alle Pinterest-scripts staan achter `ShellHost.guarded`. `pfNative` luistert alleen naar Pinterest (`ShellBridgeGate`).
+- `resetInteractionState()` bij formaatwissel, crash en geheugendruk.
+
+**YouTube binnen Pins (`YouTube.swift`, `YouTubeScripts.swift`, `YouTubeSwitcher.swift`).**
+
+- De wisselknop staat rechts, is verticaal te slepen en vervaagt na 3 s. Hij wisselt Pinterest en YouTube met een crossfade.
+- De tweede webview wordt pas gemaakt bij de eerste wissel en blijft daarna bestaan.
+- Start op `m.youtube.com/feed/subscriptions`; Home wordt omgeleid naar Abonnementen en `/shorts/` naar `/watch`.
+- **Inloggen (plan A).** Een exacte Safari-UA via `customUserAgent`, **geen** message handler op de YouTube-view, en scripts die niet draaien op `accounts.google.com`/consent. Werkt dat niet, dan is plan B RSS-abonnementen zonder login (nog niet gebouwd).
+- **Advertenties.** De responses van `/youtubei/v1/...` worden herschreven en `ytInitial*` wordt opgeschoond. Er is ook een DOM-skipper als vangnet. Dit is **niet** de globale JSON.parse-hook van Pinterest.
+- Shorts zijn verborgen, via data en CSS.
+- Achtergrond-audio: `AVAudioSession .playback` plus visibility-spoof; `UIBackgroundModes audio` zet CI erin. Beeld-in-beeld via een knop in de speler en een PiP-knop onder de wisselknop.
+- Alle selectors en renderer-namen zijn onbevestigd tot Niels een screenshot van de analyse stuurt. Advertenties blokkeren is een kat-en-muisspel.
+- **Geen** op afstand bij te werken regels.
+- CookieVault kent twee Keychain-items: `pinterest` (ongewijzigd) en `youtube` (youtube.com en google.*).
+
+**Bouwstraat.**
+
+- De job `check-js` haalt elke `#"""`-string uit `Sources/` en doet `node --check` (een `// not-js`-regel slaat hem over). Daarnaast draait er een regressietest van `adFilterJS` (`scripts/test_adfilter.js`).
+- `plutil` zet `UIBackgroundModes` erin en `verify_build.py` controleert de IPA.
+- Tags moeten `vX.Y` of `vX.Y.Z` zijn.
+- `scripts/release_notes.txt` (optioneel) wordt de "What's New" in SideStore. Verwijder hem na de release.
+
 ### Verlanglijst (van Niels, nog te doen)
 
-- externe links openen in een los venster (SFSafariViewController)
-- donkere modus
-- snellere start met een laadindicator
-- een mooiere layout voor een geopende pin, zoals in de app (wacht op screenshots)
-- daarna: animaties, layout en snelheid
+- afwachten: tests van v2.0 op de iPad (afgesneden pins, lang indrukken, YouTube-login)
+- eventueel: afbeelding opslaan in Foto's, en opnieuw op Home tikken om naar boven te scrollen
 
 ### Pin sluiten
 
