@@ -28,6 +28,10 @@ let ytAdFilterJS = #"""
   const PRUNE_PLAYER_ADS = false;   // alleen aanzetten als YouTube het afspelen gaat blokkeren
   let removed = 0;
   const origParse = JSON.parse;
+  // Ingrijpen in YouTubes dataverkeer (fetch/XHR/begindata/toString/iframes)? Uit sinds v2.3: de test op
+  // de iPad liet zien dat YouTube dat merkt en dan het laden van de video ~30 s ophoudt (zwart scherm).
+  // Nu alleen nog verbergen met CSS (ytStyleJS) en advertenties in de speler doorspoelen (E).
+  const DATA_FILTER = false;
 
   // Vervangen functies laten zich bij toString() gelden als de originele, ingebouwde functie
   const nts = Function.prototype.toString;
@@ -42,7 +46,7 @@ let ytAdFilterJS = #"""
   };
   const ts = new Proxy(nts, { apply: (t, self, a) => (fake.has(self) ? fake.get(self) : Reflect.apply(t, self, a)) });
   fake.set(ts, nts.call(nts));
-  Function.prototype.toString = ts;
+  if (DATA_FILTER) Function.prototype.toString = ts;
 
   // Namen van advertentie- en Shorts-blokken in YouTubes data (onbevestigd, zie bovenaan)
   const AD = ['adSlotRenderer', 'promotedSparklesWebRenderer', 'promotedSparklesTextSearchRenderer',
@@ -91,8 +95,10 @@ let ytAdFilterJS = #"""
       });
     } catch (e) {}
   };
-  hook('ytInitialPlayerResponse', (x) => cleanPlayer(x));
-  hook('ytInitialData', (x) => { prune(x, 0); return x; });
+  if (DATA_FILTER) {
+    hook('ytInitialPlayerResponse', (x) => cleanPlayer(x));
+    hook('ytInitialData', (x) => { prune(x, 0); return x; });
+  }
 
   // B. API-antwoorden: alleen YouTubes eigen /youtubei/v1/-adressen (dus nooit de videostream zelf)
   const API = /\/youtubei\/v1\/(player|get_watch|next|browse|search|reel\/)/;
@@ -106,7 +112,7 @@ let ytAdFilterJS = #"""
   };
 
   const of = window.fetch;
-  window.fetch = disguise(async function fetch(input, init) {
+  if (DATA_FILTER) window.fetch = disguise(async function fetch(input, init) {
     const res = await of.apply(this, arguments);
     try {
       const url = String((input && input.url) || input);
@@ -122,11 +128,11 @@ let ytAdFilterJS = #"""
 
   const urls = new WeakMap(), cache = new WeakMap(), seen = new WeakSet();
   const xo = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = disguise(function open(m, u) {
+  if (DATA_FILTER) XMLHttpRequest.prototype.open = disguise(function open(m, u) {
     try { urls.set(this, String(u)); } catch (e) {}
     return xo.apply(this, arguments);
   }, xo);
-  for (const p of ['response', 'responseText']) {
+  for (const p of (DATA_FILTER ? ['response', 'responseText'] : [])) {
     const d = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, p);
     if (!d || !d.get) continue;
     const g = disguise(function () {
@@ -149,7 +155,7 @@ let ytAdFilterJS = #"""
   }
 
   // C. YouTube haalt soms via een nieuw iframe een "schone" fetch op om te zien of die is aangepast; die krijgt onze versie
-  for (const m of ['appendChild', 'insertBefore']) {
+  for (const m of (DATA_FILTER ? ['appendChild', 'insertBefore'] : [])) {
     const o = Node.prototype[m];
     Node.prototype[m] = disguise(function (n) {
       const r = o.apply(this, arguments);
