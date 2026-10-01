@@ -317,9 +317,26 @@ Niels maakt daar screenshots van als Claude de ingelogde paginastructuur nodig h
 - `ytLogJS` blijft altijd aan. Het meet alleen wanneer de video laadt, speelt en wacht, en wanneer er een advertentie of melding is. Dat log staat in de analyse onder "start van de video".
 - **Omlaag vegen op `/watch`** gaat terug. Het is een eigen `UIPanGestureRecognizer` in de YouTube-Coordinator; de webview volgt de vinger als kaart.
 
+## v2.3
+
+**Oorzaak van het zwarte scherm gevonden** (iPad-test met de schakelaars):
+
+- met het advertentiefilter uit: geen zwart scherm
+- met het achtergrond-script uit: wel een zwart scherm
+- het startlog: `loadstart` op 0,7 s, `stalled`, en `loadedmetadata` pas op 33 s
+
+YouTube merkt dus dat het filter in het dataverkeer ingrijpt en houdt dan het laden van de video op.
+
+**Oplossing.** `DATA_FILTER = false` in `ytAdFilterJS`. Die zet uit: de fetch- en XHR-wrappers, de `ytInitial*`-hooks, de toString-proxy en de iframe-patch. Wat overblijft:
+
+- de CSS uit `ytStyleJS` verbergt advertenties en Shorts in de lijsten
+- de skipper (E) spoelt advertenties in de speler door
+
+**Niet opnieuw aanzetten** zonder iPad-test.
+
 ### Verlanglijst (van Niels, nog te doen)
 
-- afwachten: de uitkomst van de testschakelaars en het startlog (zwart scherm) op de iPad (afgesneden pins, lang indrukken, YouTube-login)
+- afwachten: de iPad-test van v2.3 op de iPad (afgesneden pins, lang indrukken, YouTube-login)
 - eventueel: afbeelding opslaan in Foto's, en opnieuw op Home tikken om naar boven te scrollen
 
 ### Pin sluiten
