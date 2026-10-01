@@ -1,0 +1,1 @@
+v2.3: YouTube-video's starten weer direct (geen zwart scherm meer). Reclame in een video wordt gedempt doorgespoeld.
