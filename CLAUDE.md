@@ -310,9 +310,16 @@ Niels maakt daar screenshots van als Claude de ingelogde paginastructuur nodig h
 - **Lang indrukken traag.** `pinSaveJS` stuurt vooraf `gridRects` (pins in documentpunten). Native vindt de pin met vinger + `contentOffset`, zonder op de pagina te wachten.
 - **Slepen naar een optie werkte niet.** iPads `UIDragInteraction` in WKWebView pakte de vinger af. Die staat nu uit (`disableImageDrag`), samen met `-webkit-user-drag: none` en `dragstart` voorkomen. Ook het preview-gebaar volgt nu de vinger.
 
+## v2.2
+
+- Het zwarte scherm voor video's bleef in v2.1 ondanks `PRUNE_PLAYER_ADS = false`. De oorzaak is dus nog onbekend.
+- **Testschakelaars** staan bovenaan de YouTube-analyse: "Advertentiefilter" en "Achtergrond-afspelen-script" (`YouTubeTest`, UserDefaults). Omschakelen verwijdert de user scripts, voegt ze opnieuw toe en herlaadt de pagina.
+- `ytLogJS` blijft altijd aan. Het meet alleen wanneer de video laadt, speelt en wacht, en wanneer er een advertentie of melding is. Dat log staat in de analyse onder "start van de video".
+- **Omlaag vegen op `/watch`** gaat terug. Het is een eigen `UIPanGestureRecognizer` in de YouTube-Coordinator; de webview volgt de vinger als kaart.
+
 ### Verlanglijst (van Niels, nog te doen)
 
-- afwachten: tests van v2.1 op de iPad (afgesneden pins, lang indrukken, YouTube-login)
+- afwachten: de uitkomst van de testschakelaars en het startlog (zwart scherm) op de iPad (afgesneden pins, lang indrukken, YouTube-login)
 - eventueel: afbeelding opslaan in Foto's, en opnieuw op Home tikken om naar boven te scrollen
 
 ### Pin sluiten
