@@ -66,6 +66,17 @@ final class NativeBridge: NSObject, WKScriptMessageHandler {
                     longPress?.prefetchMissed()
                 }
             }
+        case "gridRects":
+            // De pins die nu (bijna) in beeld zijn, vooraf gemeld (zie sendGrid in pinSaveJS)
+            let raw = (body["items"] as? [[Any]]) ?? []
+            let items: [LongPressMenu.GridPin] = raw.compactMap { a in
+                guard a.count >= 5, let x = a[0] as? NSNumber, let y = a[1] as? NSNumber,
+                      let w = a[2] as? NSNumber, let h = a[3] as? NSNumber else { return nil }
+                return LongPressMenu.GridPin(rect: CGRect(x: x.doubleValue, y: y.doubleValue,
+                                                          width: w.doubleValue, height: h.doubleValue),
+                                             href: (a[4] as? String) ?? "")
+            }
+            MainActor.assumeIsolated { longPress?.gridUpdated(items) }
         case "pinTap":
             // Tik op een pin in het raster: open-animatie starten (zie Transitions.swift)
             let rect = CGRect(x: n("x"), y: n("y"), width: n("w"), height: n("h"))
@@ -88,7 +99,7 @@ let pinSaveJS = #"""
   // gebeurt daarvoor niets meer, zodat de momentopname de pin altijd ongeschaald ziet.
   const style = document.createElement('style');
   style.textContent =
-    '[data-grid-item] { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; }' +
+    '[data-grid-item] { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; -webkit-user-drag: none !important; }' +
     // Tijdens een actie het "…"-menu van Pinterest onzichtbaar houden
     'html.pf-quiet [role="dialog"], html.pf-quiet [aria-modal="true"] { opacity: 0 !important; }' +
     '#pf-toast { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); z-index: 2147483647;' +
@@ -387,6 +398,33 @@ let pinSaveJS = #"""
     native({ type: 'pressStart', ok: true, fx: t.clientX * s, fy: t.clientY * s,
              x: r.left * s, y: r.top * s, w: r.width * s, h: r.height * s, href: pinHref(item) });
   }, { capture: true, passive: true });
+
+  // Lijst van zichtbare pins (plek van de afbeelding in documentcoördinaten, al geschaald naar punten)
+  // vooraf naar de app sturen: bij scrollen-gestopt en als het raster verandert. Dan kan de app een pin
+  // optillen zonder op de pagina te wachten, ook als Pinterest net druk is (zie LongPressMenu.swift).
+  let gridTimer = null;
+  const sendGrid = () => {
+    gridTimer = null;
+    const s = (window.visualViewport && visualViewport.scale) || 1;
+    const items = [];
+    for (const item of document.querySelectorAll('[data-grid-item]')) {
+      const img = item.querySelector('img');
+      if (!img) continue;
+      const r = img.getBoundingClientRect();
+      if (r.width < 10 || r.height < 10 || r.bottom < -innerHeight || r.top > 2 * innerHeight) continue;
+      items.push([(r.left + scrollX) * s, (r.top + scrollY) * s, r.width * s, r.height * s, pinHref(item)]);
+    }
+    native({ type: 'gridRects', items });
+  };
+  const gridSoon = (ms) => { clearTimeout(gridTimer); gridTimer = setTimeout(sendGrid, ms); };
+  addEventListener('scroll', () => gridSoon(120), { passive: true });
+  addEventListener('resize', () => gridSoon(400), { passive: true });
+  new MutationObserver(() => { if (!gridTimer) gridSoon(250); })
+    .observe(document.documentElement, { childList: true, subtree: true });
+  // Afbeeldingen van pins niet laten "oppakken" (slepen van iOS): dat steelt de vinger van het menu
+  document.addEventListener('dragstart', (e) => {
+    if (e.target.closest && e.target.closest('[data-grid-item]')) e.preventDefault();
+  }, true);
 
   document.addEventListener('touchmove', (e) => {
     if (menuTouch) e.stopPropagation();

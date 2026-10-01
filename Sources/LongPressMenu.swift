@@ -38,6 +38,13 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
         let href: String
     }
 
+    // Een pin uit de vooraf gemelde lijst (documentcoördinaten in punten, zie sendGrid in PinSave.swift)
+    struct GridPin {
+        let rect: CGRect
+        let href: String
+    }
+    private var grid: [GridPin] = []
+
     private var overlay: UIView?
     private var dim: UIView?
     private var lift: UIView?
@@ -83,6 +90,7 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
             g.delegate = self
             webView.addGestureRecognizer(g)
         }
+        disableImageDrag()
         preview.addTarget(self, action: #selector(handlePreview(_:)))
         commit.addTarget(self, action: #selector(handleCommit(_:)))
         // Verlaat de gebruiker de app met een menu open, dan blijft er niets hangen
@@ -96,6 +104,23 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+    // De pagina meldt welke pins er in beeld zijn (na scrollen of als het raster verandert)
+    func gridUpdated(_ items: [GridPin]) {
+        grid = items
+        disableImageDrag()
+    }
+
+    // iOS kan een afbeelding in een webpagina "oppakken" om te slepen (iPad). Dat begint ook bij lang
+    // indrukken en pakt dan de vinger af, waardoor slepen naar een knop van ons menu niets deed.
+    private func disableImageDrag() {
+        guard let webView else { return }
+        func walk(_ view: UIView) {
+            for case let drag as UIDragInteraction in view.interactions where drag.isEnabled { drag.isEnabled = false }
+            view.subviews.forEach(walk)
+        }
+        walk(webView)
+    }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         touchDown = touch.timestamp
@@ -117,12 +142,20 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
         case .began:
             previewOrigin = p
             PinHaptics.prepare()
+            disableImageDrag()
             if !committed { startLift(at: p) }
         case .changed:
+            // Menu open: dit gebaar volgt de vinger ook (vangnet als het menu-gebaar onderweg wegvalt)
+            if menuOpen { updateHot(at: p); return }
             // Gaat de vinger toch bewegen (scrollen), dan verdwijnt het optillen weer
             // (gemeten vanaf de plek van neerkomen, net als allowableMovement van het menu-gebaar)
             if !committed && hypot(p.x - touchStart.x, p.y - touchStart.y) > 10 { cancelLift() }
         case .ended:
+            if menuOpen {
+                updateHot(at: p)
+                if let hot { choose(options[hot].key) }
+                return
+            }
             // Vinger omhoog: een tik die hierna binnenkomt mag geen half wegvagende laag meer vinden
             if !committed { cancelLift(animated: false) }
         case .cancelled, .failed:
@@ -188,12 +221,21 @@ final class LongPressMenu: NSObject, UIGestureRecognizerDelegate {
     // Bruikbaar: van deze aanraking, dichtbij de vinger, niet aan het uitrollen. Corrigeert voor
     // een kleine verschuiving van de pagina sinds touchstart.
     private func usablePrefetch(near p: CGPoint) -> (rect: CGRect, href: String)? {
-        guard let webView, let pf = prefetch, pf.time >= touchDown, CACurrentMediaTime() - pf.time < 5,
-              hypot(pf.finger.x - p.x, pf.finger.y - p.y) < 30, !webView.scrollView.isDecelerating else { return nil }
+        guard let webView, !webView.scrollView.isDecelerating else { return nil }
         let off = webView.scrollView.contentOffset
-        let rect = pf.rect.offsetBy(dx: pf.offset.x - off.x, dy: pf.offset.y - off.y)
-        guard rect.insetBy(dx: -6, dy: -6).contains(p) else { return nil }
-        return (rect, pf.href)
+        if let pf = prefetch, pf.time >= touchDown, CACurrentMediaTime() - pf.time < 5,
+           hypot(pf.finger.x - p.x, pf.finger.y - p.y) < 30 {
+            let rect = pf.rect.offsetBy(dx: pf.offset.x - off.x, dy: pf.offset.y - off.y)
+            if rect.insetBy(dx: -6, dy: -6).contains(p) { return (rect, pf.href) }
+        }
+        // Nog geen bericht van deze aanraking (Pinterest is druk): de vooraf gemelde lijst gebruiken.
+        // Documentpunt = vinger + scrollstand (+ inzet bovenaan, die bij scrollY 0 hoort).
+        guard !(notPinAt > 0 && notPinAt >= touchDown) else { return nil }
+        let inset = webView.scrollView.adjustedContentInset
+        let shift = CGPoint(x: off.x + inset.left, y: off.y + inset.top)
+        let doc = CGPoint(x: p.x + shift.x, y: p.y + shift.y)
+        guard let pin = grid.first(where: { $0.rect.contains(doc) }) else { return nil }
+        return (pin.rect.offsetBy(dx: -shift.x, dy: -shift.y), pin.href)
     }
 
     private static func menuAtJS(_ p: CGPoint) -> String {

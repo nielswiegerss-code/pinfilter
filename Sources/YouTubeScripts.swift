@@ -21,7 +21,11 @@ let ytAdFilterJS = #"""
   if (!/(^|\.)youtube\.com$/.test(H) || H === 'accounts.youtube.com' || H === 'consent.youtube.com') return;
 
   const HIDE_SHORTS = true;
-  const NEUTRALISE_ABNORMALITY = false;   // alleen aanzetten als YouTube het afspelen gaat blokkeren
+  const NEUTRALISE_ABNORMALITY = false;
+  // Video-advertenties uit de spelerdata halen? Uit sinds v2.1: YouTube merkt dat en toont dan zelf een
+  // zwart scherm zo lang als de advertentie had geduurd. Nu laat de speler de advertentie starten en
+  // spoelt het vangnet (E, hieronder) hem direct door, gedempt. De feed wordt nog wel gefilterd.
+  const PRUNE_PLAYER_ADS = false;   // alleen aanzetten als YouTube het afspelen gaat blokkeren
   let removed = 0;
   const origParse = JSON.parse;
 
@@ -69,7 +73,7 @@ let ytAdFilterJS = #"""
   };
   // Spelerdata: de velden waaruit de speler zijn advertenties haalt weghalen
   const cleanPlayer = (o) => {
-    if (o && typeof o === 'object') {
+    if (PRUNE_PLAYER_ADS && o && typeof o === 'object') {
       for (const k of ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams']) if (k in o) { delete o[k]; removed++; }
       if (o.playerResponse) cleanPlayer(o.playerResponse);
     }
@@ -94,7 +98,7 @@ let ytAdFilterJS = #"""
   const API = /\/youtubei\/v1\/(player|get_watch|next|browse|search|reel\/)/;
   const MARK = /"(adSlotRenderer|promotedSparklesWebRenderer|compactPromotedVideoRenderer|promotedVideoRenderer|reelShelfRenderer|shortsLockupViewModel|reelWatchEndpoint)"/;
   const rewrite = (text) => {
-    let t = text.replace(/"(adPlacements|adSlots|playerAds)"/g, '"no_$1"');
+    let t = PRUNE_PLAYER_ADS ? text.replace(/"(adPlacements|adSlots|playerAds)"/g, '"no_$1"') : text;
     if (MARK.test(t)) {
       try { const o = origParse(t); prune(o, 0); t = JSON.stringify(o); } catch (e) {}
     }
@@ -166,17 +170,32 @@ let ytAdFilterJS = #"""
 
   // E. Vangnet voor advertenties die toch in de speler beginnen: dempen, naar het einde spoelen, overslaan.
   // Niet bij "SSAP" (advertenties die in de videostream zelf zijn gelijmd): dan zou echte inhoud wegvallen.
-  let queued = false;
+  // Na de advertentie geluid en snelheid terugzetten zoals ze waren (wij hadden ze veranderd).
+  let queued = false, touched = null;
+  const restore = () => {
+    if (!touched) return;
+    const { v, muted, rate } = touched;
+    touched = null;
+    try { v.muted = muted; v.playbackRate = rate; } catch (e) {}
+  };
   const skip = () => {
     queued = false;
     const p = document.querySelector('#movie_player.ad-showing, .html5-video-player.ad-showing');
-    if (!p) return;
+    if (!p) { restore(); return; }
     let ssap = false;
     try { ssap = String((p.getStatsForNerds && p.getStatsForNerds().debug_info) || '').startsWith('SSAP'); } catch (e) {}
     const v = p.querySelector('video');
-    if (v && !ssap && isFinite(v.duration) && v.duration > 0) { v.muted = true; v.currentTime = v.duration; }
-    document.querySelectorAll('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .videoAdUiSkipButton, .ytp-ad-overlay-close-button')
+    if (v && !ssap) {
+      if (!touched || touched.v !== v) touched = { v, muted: v.muted, rate: v.playbackRate || 1 };
+      v.muted = true;
+      try { v.playbackRate = 16; } catch (e) {}
+      if (isFinite(v.duration) && v.duration > 0 && v.currentTime < v.duration - 0.1) v.currentTime = v.duration - 0.05;
+      removed++;
+    }
+    document.querySelectorAll('.ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .videoAdUiSkipButton, .ytp-ad-overlay-close-button, button[class*="skip-ad"], .ytm-skip-ad-button, [class*="ad-skip"] button')
       .forEach((b) => b.click());
+    // De speler wisselt soms pas even later; nog een keer kijken
+    setTimeout(() => { if (!queued) { queued = true; requestAnimationFrame(skip); } }, 250);
   };
   const watch = () => {
     if (!document.documentElement) return false;

@@ -83,7 +83,9 @@ enum YouTubeMedia {
 }
 
 // Identiteit: Google blokkeert inloggen in ingebouwde webweergaves. Deze weergave geeft zich daarom uit
-// voor precies Safari op de iPad (de OS-versie komt van het apparaat zelf, niet uit een vaste tekst).
+// voor precies Safari (de OS-versie komt van het apparaat zelf, niet uit een vaste tekst).
+// Sinds v2.1 Safari op een iPhone: met een iPad-identiteit stuurt YouTube de desktopsite (www) met
+// zijbalk; met een iPhone-identiteit de mobiele site (m.youtube.com) die op de app lijkt.
 @MainActor
 enum YouTubeIdentity {
     // Vraagt de webweergave zelf wat hij als user agent stuurt, en bouwt daar de Safari-vorm van
@@ -106,25 +108,32 @@ enum YouTubeIdentity {
 
     private final class Once { var done = false }
 
-    // Safari op iPad (aanraakversie): "... AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1".
-    // De webweergave zelf laat "Version/" en "Safari/" weg; die voegen we toe, in de volgorde van Safari.
+    // Safari op iPhone: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko)
+    // Version/26.0 Mobile/15E148 Safari/604.1". Uit wat de webweergave zelf meldt nemen we het OS-getal en de
+    // build; "Version/" en "Safari/" voegen we toe, in de volgorde van Safari.
     static func compose(from reported: String?) -> String {
         let parts = UIDevice.current.systemVersion.split(separator: ".").compactMap { Int($0) }
         let major = parts.first ?? 18
         let minor = parts.count > 1 ? parts[1] : 0
         let version = "\(major).\(minor)"
 
-        if let ua = reported, ua.contains("(iPad;"),
-           let mobile = ua.range(of: " Mobile/") {
-            let tokenEnd = ua[mobile.upperBound...].firstIndex(of: " ") ?? ua.endIndex
-            let mobileToken = String(ua[mobile.upperBound..<tokenEnd])
-            var baseEnd = mobile.lowerBound
-            if let v = ua.range(of: " Version/"), v.lowerBound < baseEnd { baseEnd = v.lowerBound }
-            return "\(ua[..<baseEnd]) Version/\(version) Mobile/\(mobileToken) Safari/604.1"
-        }
         // Apple heeft het OS-getal in de user agent bevroren op 18_6 vanaf iOS 26
-        let os = major >= 26 ? "18_6" : "\(major)_\(minor)"
-        return "Mozilla/5.0 (iPad; CPU OS \(os) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/\(version) Mobile/15E148 Safari/604.1"
+        var os = major >= 26 ? "18_6" : "\(major)_\(minor)"
+        var mobileToken = "15E148"
+        var webkit = "AppleWebKit/605.1.15 (KHTML, like Gecko)"
+        if let ua = reported {
+            if let r = ua.range(of: #"OS (\d+_\d+(_\d+)?) like"#, options: .regularExpression) {
+                os = String(ua[r].dropFirst(3).dropLast(5))
+            }
+            if let m = ua.range(of: " Mobile/") {
+                let end = ua[m.upperBound...].firstIndex(of: " ") ?? ua.endIndex
+                mobileToken = String(ua[m.upperBound..<end])
+            }
+            if let w = ua.range(of: #"AppleWebKit/[\d.]+ \(KHTML, like Gecko\)"#, options: .regularExpression) {
+                webkit = String(ua[w])
+            }
+        }
+        return "Mozilla/5.0 (iPhone; CPU iPhone OS \(os) like Mac OS X) \(webkit) Version/\(version) Mobile/\(mobileToken) Safari/604.1"
     }
 }
 
@@ -286,7 +295,15 @@ struct YouTubeView: UIViewRepresentable {
         private func rerouteTarget(for url: URL) -> URL? {
             guard let host = url.host?.lowercased(), YouTubeConfig.hosts.contains(host) else { return nil }
             var target: URL?
-            if YouTubeConfig.homeGoesToSubscriptions, url.path.isEmpty || url.path == "/" {
+            // De desktopsite (www) altijd naar de mobiele site, met hetzelfde pad
+            if host != "m.youtube.com", var c = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+                c.host = "m.youtube.com"
+                if YouTubeConfig.homeGoesToSubscriptions, url.path.isEmpty || url.path == "/" {
+                    target = YouTubeConfig.startURL
+                } else {
+                    target = c.url
+                }
+            } else if YouTubeConfig.homeGoesToSubscriptions, url.path.isEmpty || url.path == "/" {
                 target = YouTubeConfig.startURL
             } else if url.path.hasPrefix("/shorts/"), url.pathComponents.count > 2 {
                 let id = url.pathComponents[2].addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
