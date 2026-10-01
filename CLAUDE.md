@@ -301,9 +301,18 @@ Niels maakt daar screenshots van als Claude de ingelogde paginastructuur nodig h
 - Tags moeten `vX.Y` of `vX.Y.Z` zijn.
 - `scripts/release_notes.txt` (optioneel) wordt de "What's New" in SideStore. Verwijder hem na de release.
 
+## v2.1 (na de eerste iPad-test van v2.0)
+
+- **YouTube-inloggen werkt** (plan A).
+- **Wisselknop.** Dit is een UIKit-knop (`SwitcherButton`). De SwiftUI-gebaren kwamen boven de webview niet meer aan nadat de knop vervaagde.
+- **YouTube-identiteit.** Die is nu Safari op **iPhone**, omdat YouTube met een iPad-UA de desktopsite stuurt. `www.youtube.com` wordt omgeleid naar `m.youtube.com`.
+- **Zwart scherm voor video's (ongeveer 10 s).** Dat was YouTubes straf voor weggehaalde spelerdata. `PRUNE_PLAYER_ADS = false`: de advertentie mag starten, en het vangnet zet hem op stil met snelheid 16, spoelt naar het einde, drukt op overslaan en zet het geluid daarna terug. De feed wordt nog wel gefilterd.
+- **Lang indrukken traag.** `pinSaveJS` stuurt vooraf `gridRects` (pins in documentpunten). Native vindt de pin met vinger + `contentOffset`, zonder op de pagina te wachten.
+- **Slepen naar een optie werkte niet.** iPads `UIDragInteraction` in WKWebView pakte de vinger af. Die staat nu uit (`disableImageDrag`), samen met `-webkit-user-drag: none` en `dragstart` voorkomen. Ook het preview-gebaar volgt nu de vinger.
+
 ### Verlanglijst (van Niels, nog te doen)
 
-- afwachten: tests van v2.0 op de iPad (afgesneden pins, lang indrukken, YouTube-login)
+- afwachten: tests van v2.1 op de iPad (afgesneden pins, lang indrukken, YouTube-login)
 - eventueel: afbeelding opslaan in Foto's, en opnieuw op Home tikken om naar boven te scrollen
 
 ### Pin sluiten
