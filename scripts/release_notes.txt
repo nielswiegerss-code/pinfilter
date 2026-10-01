@@ -1,1 +1,0 @@
-v2.2: omlaag vegen op een YouTube-video gaat terug. Testschakelaars en een startlog in de YouTube-analyse om het zwarte scherm voor video's op te sporen.
