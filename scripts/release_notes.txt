@@ -1,1 +1,0 @@
-v2.1: wisselknop blijft bedienbaar, YouTube in de mobiele (app-achtige) layout en zonder zwart scherm voor video's, lang indrukken op een pin reageert direct en slepen naar een optie werkt.
