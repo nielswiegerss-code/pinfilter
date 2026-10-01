@@ -420,6 +420,42 @@ let ytMediaJS = #"""
 
 // Analyse voor als er toch een advertentie doorheen komt: wordt onder de pagina-analyse gezet (lang indrukken
 // op de wisselknop terwijl YouTube open staat). Niels maakt er een screenshot van voor Claude.
+// Alleen meten (verandert niets): wanneer de video laadt, begint en wacht, en wanneer YouTube een
+// advertentie toont. Zo is in de analyse te zien waar het zwarte scherm voor een video vandaan komt.
+let ytLogJS = #"""
+(() => {
+  'use strict';
+  const H = location.hostname;
+  if (!/(^|\.)youtube\.com$/.test(H) || /^(accounts|consent)\./.test(H)) return;
+  const log = [];
+  let t0 = performance.now();
+  const add = (what) => {
+    log.push(((performance.now() - t0) / 1000).toFixed(1) + 's ' + what);
+    if (log.length > 40) log.shift();
+  };
+  addEventListener('yt-navigate-start', () => { t0 = performance.now(); log.length = 0; add('navigatie'); }, true);
+  addEventListener('state-navigatestart', () => { t0 = performance.now(); log.length = 0; add('navigatie'); }, true);
+  for (const ev of ['loadstart', 'loadedmetadata', 'canplay', 'playing', 'waiting', 'stalled', 'pause', 'error', 'emptied']) {
+    document.addEventListener(ev, (e) => {
+      const v = e.target;
+      if (!(v instanceof HTMLMediaElement)) return;
+      add(ev + ' rs=' + v.readyState + ' t=' + v.currentTime.toFixed(1) + (v.muted ? ' stil' : '') +
+          (ev === 'error' && v.error ? ' code=' + v.error.code : ''));
+    }, true);
+  }
+  let ad = false, shown = '';
+  setInterval(() => {
+    const p = document.querySelector('#movie_player, .html5-video-player');
+    const now = !!(p && p.classList.contains('ad-showing'));
+    if (now !== ad) { ad = now; add(now ? 'advertentie begint' : 'advertentie klaar'); }
+    const msg = document.querySelector('.ytp-ad-text, .ad-interrupting, [class*="interruption"], [class*="enforcement"]');
+    const cls = msg ? String(msg.className || '').slice(0, 60) : '';
+    if (cls && cls !== shown) { shown = cls; add('melding: ' + cls); }
+  }, 300);
+  window.__pfYtLog = () => log.join('\n');
+})();
+"""#
+
 let ytProbeJS = #"""
 (() => {
   const L = [];
@@ -440,8 +476,10 @@ let ytProbeJS = #"""
     } else {
       L.push('speler geen #movie_player');
     }
+    L.push('testschakelaars: filter ' + (window.__pfAdStats ? 'aan' : 'uit') + ', achtergrond ' + (window.__pfResume ? 'aan' : 'uit'));
+    L.push('--- start van de video ---\n' + (window.__pfYtLog ? window.__pfYtLog() : '(geen log)') + '\n---');
     const v = document.querySelector('video');
-    L.push('video ' + (v ? 'paused=' + v.paused + ' pip=' + (v.webkitPresentationMode || '-') + ' t=' + Math.round(v.currentTime) : 'geen'));
+    L.push('video ' + (v ? 'paused=' + v.paused + ' rs=' + v.readyState + ' net=' + v.networkState + ' pip=' + (v.webkitPresentationMode || '-') + ' t=' + Math.round(v.currentTime) : 'geen'));
     L.push('pip-knop ' + (document.querySelector('.pf-pip') ? 'ja' : 'nee'));
 
     // Blokken in de begindata met Ad/Promoted/Reel/Short in de naam (dat wat het filter liet staan)

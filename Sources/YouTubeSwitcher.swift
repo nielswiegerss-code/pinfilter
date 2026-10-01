@@ -67,6 +67,17 @@ struct SiteSwitcher: View {
         .sheet(isPresented: Binding(get: { report != nil }, set: { if !$0 { report = nil } })) {
             NavigationStack {
                 ScrollView {
+                    if model.current == .youtube {
+                        // Testschakelaars om de oorzaak van het zwarte scherm te vinden (pagina laadt opnieuw)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Toggle("Advertentiefilter", isOn: Binding(get: { model.testFilterOn },
+                                                                     set: { model.setTest(filter: $0, media: model.testMediaOn) }))
+                            Toggle("Achtergrond-afspelen-script", isOn: Binding(get: { model.testMediaOn },
+                                                                              set: { model.setTest(filter: model.testFilterOn, media: $0) }))
+                        }
+                        .padding(.horizontal)
+                        .padding(.top)
+                    }
                     Text(report ?? "")
                         .font(.system(size: 11, design: .monospaced))
                         .textSelection(.enabled)

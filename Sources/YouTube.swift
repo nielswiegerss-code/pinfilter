@@ -49,6 +49,22 @@ final class SiteModel: ObservableObject {
         youtubeWebView?.evaluateJavaScript("window.__pfPip ? window.__pfPip() : ''") { _, _ in }
     }
 
+    // Testschakelaars (in de YouTube-analyse): scripts aan/uit, daarna de pagina opnieuw laden
+    @Published var testFilterOn = YouTubeTest.filterOn
+    @Published var testMediaOn = YouTubeTest.mediaOn
+
+    func setTest(filter: Bool, media: Bool) {
+        YouTubeTest.filterOn = filter
+        YouTubeTest.mediaOn = media
+        testFilterOn = filter
+        testMediaOn = media
+        guard let webView = youtubeWebView else { return }
+        let ucc = webView.configuration.userContentController
+        ucc.removeAllUserScripts()
+        YouTubeTest.install(into: ucc)
+        webView.reload()
+    }
+
     // Pagina-analyse van de YouTube-weergave, met de YouTube-sectie eronder
     func youtubeReport() async -> String {
         let base = await PageReport.make(webView: youtubeWebView)
@@ -57,6 +73,30 @@ final class SiteModel: ObservableObject {
             probe = (try? await webView.evaluateJavaScript(ytProbeJS) as? String) ?? "(pagina gaf geen antwoord)"
         }
         return base + "\n\n--- YouTube ---\n" + probe
+    }
+}
+
+// Om uit te zoeken waar het zwarte scherm voor een video vandaan komt: het advertentiefilter en het
+// achtergrond-script zijn apart uit te zetten (onthouden). ytLogJS (alleen meten) en ytStyleJS blijven altijd aan.
+@MainActor
+enum YouTubeTest {
+    static var filterOn: Bool {
+        get { !UserDefaults.standard.bool(forKey: "ytTestNoFilter") }
+        set { UserDefaults.standard.set(!newValue, forKey: "ytTestNoFilter") }
+    }
+    static var mediaOn: Bool {
+        get { !UserDefaults.standard.bool(forKey: "ytTestNoMedia") }
+        set { UserDefaults.standard.set(!newValue, forKey: "ytTestNoMedia") }
+    }
+
+    static func install(into ucc: WKUserContentController) {
+        var sources = [ytLogJS]
+        if filterOn { sources.append(ytAdFilterJS) }
+        if mediaOn { sources.append(ytMediaJS) }
+        sources.append(ytStyleJS)
+        for source in sources {
+            ucc.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
     }
 }
 
@@ -152,11 +192,7 @@ struct YouTubeView: UIViewRepresentable {
         config.allowsPictureInPictureMediaPlayback = true
 
         // Alle scripts: hoofdframe, vóór de code van YouTube, en met een eigen controle op de hostnaam
-        for source in [ytAdFilterJS, ytMediaJS, ytStyleJS] {
-            config.userContentController.addUserScript(WKUserScript(source: source,
-                                                                    injectionTime: .atDocumentStart,
-                                                                    forMainFrameOnly: true))
-        }
+        YouTubeTest.install(into: config.userContentController)
         // Bewust GEEN userContentController.add(_, name:): dat is in de pagina zichtbaar en Safari heeft dat niet
 
         let webView = WKWebView(frame: .zero, configuration: config)
@@ -175,6 +211,7 @@ struct YouTubeView: UIViewRepresentable {
         webView.scrollView.refreshControl = refresh
         context.coordinator.attach(webView, refresh: refresh)
         model.youtubeWebView = webView
+        context.coordinator.attachSwipe()
         YouTubeMedia.activate()
 
         // Eerst de bewaarde login terugzetten en de Safari-identiteit bepalen, pas daarna laden
@@ -191,7 +228,7 @@ struct YouTubeView: UIViewRepresentable {
     }
 
     @MainActor
-    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, UIGestureRecognizerDelegate {
         private let model: SiteModel
         weak var webView: WKWebView?
         private var refresh: UIRefreshControl?
@@ -218,6 +255,68 @@ struct YouTubeView: UIViewRepresentable {
             // YouTube wisselt van pagina zonder te herladen; de URL volgen we daarom zo
             urlObservation = webView.observe(\.url) { [weak self] _, _ in
                 Task { @MainActor in self?.urlChanged() }
+            }
+        }
+
+        // MARK: Omlaag vegen op een video = terug (zoals de YouTube-app)
+        // Alleen op /watch, helemaal bovenaan en bij een beweging omlaag. De hele weergave volgt de vinger
+        // als krimpende kaart; ver genoeg (of snel) losgelaten = terug naar de vorige pagina.
+        private let swipe = UIPanGestureRecognizer()
+
+        func attachSwipe() {
+            guard let webView, swipe.view == nil else { return }
+            swipe.addTarget(self, action: #selector(handleSwipe(_:)))
+            swipe.delegate = self
+            webView.addGestureRecognizer(swipe)
+        }
+
+        func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+            guard g === swipe, let webView, isWatchPage else { return false }
+            let sv = webView.scrollView
+            guard sv.contentOffset.y <= -sv.adjustedContentInset.top + 1 else { return false }
+            let v = swipe.velocity(in: webView)
+            return v.y > 0 && abs(v.x) < v.y
+        }
+
+        func gestureRecognizer(_ g: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+
+        @objc private func handleSwipe(_ pan: UIPanGestureRecognizer) {
+            guard let webView, let host = webView.superview else { return }
+            let dy = max(0, pan.translation(in: host).y)
+            let progress = min(dy / max(host.bounds.height, 1), 1)
+            switch pan.state {
+            case .began:
+                webView.scrollView.isScrollEnabled = false
+                webView.layer.cornerCurve = .continuous
+                webView.layer.masksToBounds = true
+            case .changed:
+                let s = 1 - 0.25 * progress
+                webView.transform = CGAffineTransform(translationX: 0, y: dy * 0.85).scaledBy(x: s, y: s)
+                webView.layer.cornerRadius = 28 * min(progress * 4, 1)
+            case .ended, .cancelled, .failed:
+                webView.scrollView.isScrollEnabled = true
+                let v = pan.velocity(in: host).y
+                let commit = pan.state == .ended && (dy > 130 || (v > 700 && dy > 30))
+                if commit {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    UIView.animate(withDuration: 0.22, delay: 0, options: .curveEaseIn) {
+                        webView.transform = CGAffineTransform(translationX: 0, y: host.bounds.height * 0.6).scaledBy(x: 0.6, y: 0.6)
+                        webView.alpha = 0
+                    } completion: { _ in
+                        if webView.canGoBack { webView.goBack() } else { webView.load(URLRequest(url: YouTubeConfig.startURL)) }
+                        webView.transform = .identity
+                        webView.layer.cornerRadius = 0
+                        UIView.animate(withDuration: 0.25, delay: 0.1) { webView.alpha = 1 }
+                    }
+                } else {
+                    UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+                        webView.transform = .identity
+                        webView.layer.cornerRadius = 0
+                    }
+                }
+            default:
+                break
             }
         }
 
